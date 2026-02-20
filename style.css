@@ -412,17 +412,64 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }
 }
 .error-msg.hidden { display: none; }
 
-/* ── Spectator Notice (mid-game joiners) ─────────────── */
-.spectator-notice {
-  display: flex; flex-direction: column; align-items: center;
-  gap: 14px; text-align: center;
-  padding: 52px 24px;
-  background: var(--bg2); border: 1px dashed var(--border2);
-  border-radius: var(--radius);
+/* ── Spectator Panel (mid-game observer) ────────────── */
+.spec-hero {
+  text-align: center; padding: 24px 20px 16px;
 }
-.spectator-icon  { font-size: 3rem; }
-.spectator-title { font-family: var(--serif); font-size: 1.1rem; font-weight: 700; color: var(--txt0); }
-.spectator-hint  { font-size: .86rem; color: var(--txt1); line-height: 1.75; }
+.spec-glyph {
+  font-size: 3.5rem; margin-bottom: 8px; display: block;
+  animation: glyph-float 3s ease-in-out infinite;
+}
+.spec-title {
+  font-family: var(--serif); font-size: 1.4rem; font-weight: 700;
+  color: var(--gold2); margin-bottom: 6px;
+}
+.spec-desc {
+  font-size: .86rem; color: var(--txt1); line-height: 1.75;
+}
+.spec-status-card {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 18px 20px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.spec-status-row {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+}
+.spec-round-label {
+  font-family: var(--serif); font-weight: 700; font-size: .95rem; color: var(--txt0);
+}
+.spec-lock-badge {
+  font-size: .78rem; padding: 3px 10px; border-radius: 20px;
+  background: rgba(74,192,160,.12); color: var(--teal); font-weight: 700;
+}
+.spec-players-grid {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.spec-player-chip {
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 12px; border-radius: var(--radius-sm);
+  background: var(--bg1); border: 1.5px solid var(--border);
+  transition: border-color .2s, background .2s;
+}
+.spec-player-chip.locked {
+  border-color: rgba(201,168,76,.4); background: rgba(201,168,76,.06);
+}
+.spec-avatar {
+  width: 26px; height: 26px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: .75rem; color: #000; flex-shrink: 0;
+}
+.spec-pname     { font-size: .85rem; font-weight: 500; color: var(--txt0); }
+.spec-lock-icon { font-size: .88rem; }
+.spec-waiting {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 18px; background: var(--bg2);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--txt1); font-size: .88rem;
+}
+
+/* ── Spectator Badge in Room Player List ────────────── */
+.p-badge-spec { background: rgba(155,133,232,.15); color: var(--purple); }
 
 /* ── Scrollbar ──────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 5px; height: 5px; }

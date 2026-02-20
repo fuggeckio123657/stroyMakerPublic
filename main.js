@@ -1,28 +1,27 @@
 'use strict';
 
+/*
+ * 故事接龍 · main.js
+ *
+ * Architecture: Firebase Realtime Database handles ALL communication.
+ *   WebRTC removed entirely — was failing on symmetric NAT / mobile networks.
+ *
+ * Firebase DB paths:
+ *   rooms/{code}/info          { host, createdAt }
+ *   rooms/{code}/players/{pid} { name, joinedAt, isSpectator }
+ *   rooms/{code}/game          { full game state — written by host only }
+ *   rooms/{code}/actions/{key} { type, playerId, text?, ts — consumed by host }
+ */
+
 // ═══════════════════════════════════════════════════════════════════════
 // LAYER 1 ─ Global Configuration & Constants
 // ═══════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-  HEARTBEAT_INTERVAL : 2000,
-  PEER_TIMEOUT       : 8000,
-  MAX_PLAYERS        : 8,
-  MIN_PLAYERS        : 2,
-  DEFAULT_ROUNDS     : 2,
-  DEFAULT_TURN_TIME  : 90,
-  ICE_SERVERS: [
-    // STUN – discover public IPs
-    { urls: 'stun:stun.l.google.com:19302'        },
-    { urls: 'stun:stun1.l.google.com:19302'       },
-    { urls: 'stun:stun2.l.google.com:19302'       },
-    { urls: 'stun:stun.stunprotocol.org:3478'     },
-    // TURN – relay traffic through symmetric NAT (different home / mobile networks)
-    { urls: 'turn:openrelay.metered.ca:80',          username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443',         username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turns:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-  ],
+  MAX_PLAYERS       : 8,
+  MIN_PLAYERS       : 2,
+  DEFAULT_ROUNDS    : 2,
+  DEFAULT_TURN_TIME : 90,
   FIREBASE: {
     apiKey           : 'AIzaSyBzzMXBgVXvUw2V8tRXw7sEFNQRg-zQEeY',
     authDomain       : 'manyp-a838a.firebaseapp.com',
@@ -34,15 +33,6 @@ const CONFIG = {
   },
 };
 
-// Wire-protocol message types
-const MSG = {
-  HB         : 'hb',
-  HB_ACK     : 'hb_ack',
-  GAME_STATE : 'game_state',
-  ACTION     : 'action',
-};
-
-// Player action types
 const ACTION = {
   LOCK        : 'lock',
   UNLOCK      : 'unlock',
@@ -50,26 +40,21 @@ const ACTION = {
   RETURN_LOBBY: 'return_lobby',
 };
 
-// Game phases
 const PHASE = {
-  WAITING   : 'waiting',
-  WRITING   : 'writing',
-  REVEALING : 'revealing',
-  FINISHED  : 'finished',
+  WAITING  : 'waiting',
+  WRITING  : 'writing',
+  REVEALING: 'revealing',
+  FINISHED : 'finished',
 };
 
-// Internal event names
 const EVT = {
-  PLAYER_JOINED      : 'player:joined',
-  PLAYER_LEFT        : 'player:left',
-  PEER_CONNECTED     : 'peer:connected',
-  PEER_DISCONNECTED  : 'peer:disconnected',
-  GAME_STATE_UPDATED : 'game:state_updated',
-  ACTION_RECEIVED    : 'action:received',
-  ROOM_JOINED        : 'room:joined',
-  TOAST              : 'ui:toast',
-  RETURN_LOBBY       : 'ui:return_lobby',
-  _ICE               : '_webrtc:ice',
+  PLAYER_JOINED     : 'player:joined',
+  PLAYER_LEFT       : 'player:left',
+  GAME_STATE_UPDATED: 'game:state_updated',
+  ACTION_RECEIVED   : 'action:received',
+  ROOM_JOINED       : 'room:joined',
+  TOAST             : 'ui:toast',
+  RETURN_LOBBY      : 'ui:return_lobby',
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -85,52 +70,48 @@ const Utils = {
   shuffle(arr) {
     const a = [...arr];
     for (let i = a.length - 1; i > 0; i--) {
-      const j = (Math.random() * (i + 1)) | 0;
+      const j = Math.floor(Math.random() * (i + 1));
       [a[i], a[j]] = [a[j], a[i]];
     }
     return a;
   },
 
-  avatarColor(name = '') {
-    const p = ['#c9a84c','#4ac0a0','#9b85e8','#e07050','#60b0e8','#d4807a','#80c870','#c080c8'];
+  avatarColor(name) {
+    const palette = ['#c9a84c','#4ac0a0','#9b85e8','#e07050','#60b0e8','#d4807a','#80c870','#c080c8'];
     let h = 0;
-    for (const c of name) h = (h * 31 + c.charCodeAt(0)) & 0xffff;
-    return p[h % p.length];
+    for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) & 0xffff;
+    return palette[h % palette.length];
   },
 
-  escapeHtml(s = '') {
-    return String(s)
+  escapeHtml(s) {
+    return String(s || '')
       .replace(/&/g,'&amp;').replace(/</g,'&lt;')
       .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   },
 
-  /**
-   * For the reveal phase: given all stories and a step number,
-   * return how many segments are visible for each story.
-   * Stories are revealed sequentially (story 0 all, then story 1 all, …).
-   */
   computeReveal(stories, step) {
-    const out = stories.map(() => []);
-    let rem   = step;
-    for (let i = 0; i < stories.length && rem > 0; i++) {
-      const n    = Math.min(rem, stories[i].length);
-      out[i]     = stories[i].slice(0, n);
-      rem       -= n;
+    const result = [];
+    let rem = step;
+    for (const story of stories) {
+      const n = Math.min(rem, story.length);
+      result.push(story.slice(0, n));
+      rem -= n;
+      if (rem <= 0) { while (result.length < stories.length) result.push([]); break; }
     }
-    return out;
+    while (result.length < stories.length) result.push([]);
+    return result;
   },
 
-  /** Index of the story currently being filled by the reveal cursor. */
   activeRevealStory(stories, step) {
     let rem = step;
     for (let i = 0; i < stories.length; i++) {
-      if (rem <= stories[i].length) return i;
+      if (rem < stories[i].length) return i;
       rem -= stories[i].length;
     }
     return stories.length - 1;
   },
 
-  maxRevealSteps: (stories) => stories.reduce((s, st) => s + st.length, 0),
+  maxRevealSteps: (stories) => (stories || []).reduce((s, st) => s + st.length, 0),
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -140,30 +121,30 @@ const Utils = {
 class EventBus {
   constructor() { this._m = {}; }
 
-  on(ev, cb) {
-    (this._m[ev] ??= new Set()).add(cb);
-    return () => this._m[ev]?.delete(cb);
+  on(event, cb) {
+    if (!this._m[event]) this._m[event] = new Set();
+    this._m[event].add(cb);
+    return () => { if (this._m[event]) this._m[event].delete(cb); };
   }
 
-  emit(ev, data) {
-    this._m[ev]?.forEach(cb => { try { cb(data); } catch(e) { console.error(`[Bus:${ev}]`, e); } });
+  once(event, cb) {
+    const off = this.on(event, d => { cb(d); off(); });
+  }
+
+  emit(event, data) {
+    if (!this._m[event]) return;
+    this._m[event].forEach(cb => {
+      try { cb(data); } catch(e) { console.error('[Bus]', event, e); }
+    });
   }
 }
 
 const bus = new EventBus();
 
 // ═══════════════════════════════════════════════════════════════════════
-// LAYER 4 ─ Global State Store  (single source of truth)
+// LAYER 4 ─ Global State Store
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Round definition:
- *   turnsPerRound = N players  →  each player writes every story once per round
- *   totalTurns    = turnsPerRound × totalRounds
- *
- * Displayed round   = ceil(currentTurn / turnsPerRound)
- * Turn within round = ((currentTurn - 1) % turnsPerRound) + 1
- */
 const makeGame = () => ({
   phase        : PHASE.WAITING,
   currentTurn  : 0,
@@ -173,191 +154,50 @@ const makeGame = () => ({
   mode         : 'round',
   turnTime     : CONFIG.DEFAULT_TURN_TIME,
   timeLeft     : 0,
-  assignments  : {},   // { playerId: storyIndex }
-  stories      : [],   // Array of story arrays: [ [{authorId,authorName,text}] ]
-  locked       : {},   // { playerId: true }
-  submissions  : {},   // { playerId: text }
+  assignments  : {},
+  stories      : [],
+  locked       : {},
+  submissions  : {},
   reveal       : { step: 0 },
 });
 
 class Store {
   constructor(init) { this._s = Utils.deepClone(init); this._subs = new Set(); }
 
-  get()           { return this._s; }
-  subscribe(fn)   { this._subs.add(fn); return () => this._subs.delete(fn); }
-  _notify()       { this._subs.forEach(fn => { try { fn(this._s); } catch(_){} }); }
+  get()             { return this._s; }
+  subscribe(fn)     { this._subs.add(fn); return () => this._subs.delete(fn); }
+  _notify()         { this._subs.forEach(fn => { try { fn(this._s); } catch(_){} }); }
 
-  set(partial) {
-    this._s = { ...this._s, ...partial };
-    this._notify();
-  }
-
-  // Merge partial into the game sub-object only
-  patchGame(partial) {
-    this._s = { ...this._s, game: { ...this._s.game, ...partial } };
-    this._notify();
-  }
-
-  // Replace entire game object (used when receiving host broadcast)
-  replaceGame(game) {
-    this._s = { ...this._s, game };
-    this._notify();
-  }
+  set(partial)      { this._s = Object.assign({}, this._s, partial); this._notify(); }
+  patchGame(p)      { this._s = Object.assign({}, this._s, { game: Object.assign({}, this._s.game, p) }); this._notify(); }
+  replaceGame(game) { this._s = Object.assign({}, this._s, { game }); this._notify(); }
 }
 
 const store = new Store({
-  myId    : null,
-  myName  : '',
-  roomCode: '',
-  isHost  : false,
-  hostId  : null,
-  players : {},
-  settings: { mode: 'round', rounds: CONFIG.DEFAULT_ROUNDS, turnTime: CONFIG.DEFAULT_TURN_TIME },
-  game    : makeGame(),
+  myId       : null,
+  myName     : '',
+  roomCode   : '',
+  isHost     : false,
+  hostId     : null,
+  isSpectator: false,
+  players    : {},
+  settings   : { mode: 'round', rounds: CONFIG.DEFAULT_ROUNDS, turnTime: CONFIG.DEFAULT_TURN_TIME },
+  game       : makeGame(),
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// LAYER 5 ─ WebRTC Connection Manager
+// LAYER 5 ─ Firebase Transport
+//
+//  Replaces WebRTC + Signaling entirely.
+//  All game messages travel through Firebase Realtime Database.
+//  Works on all networks — zero NAT traversal required.
 // ═══════════════════════════════════════════════════════════════════════
 
-class WebRTCManager {
+class FirebaseTransport {
   constructor() {
-    this._pcs      = new Map();   // peerId → RTCPeerConnection
-    this._channels = new Map();   // peerId → RTCDataChannel
-    this._hbTimers = new Map();   // peerId → intervalId
-    this._lastSeen = new Map();   // peerId → timestamp
-    this._iceQueue = new Map();   // peerId → pending candidates
+    this._db  = null;
+    this._off = [];
   }
-
-  async createOffer(peerId) {
-    const pc  = this._newPC(peerId);
-    const ch  = pc.createDataChannel('relay', { ordered: true });
-    this._wireChannel(peerId, ch);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    return offer;
-  }
-
-  async handleOffer(peerId, sdp) {
-    const pc = this._newPC(peerId);
-    await pc.setRemoteDescription({ type: 'offer', sdp });
-    await this._flushICE(peerId, pc);
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    return answer;
-  }
-
-  async handleAnswer(peerId, sdp) {
-    const pc = this._pcs.get(peerId);
-    if (!pc) return;
-    await pc.setRemoteDescription({ type: 'answer', sdp });
-    // ← CRITICAL: flush ICE candidates that arrived before remote description was set
-    await this._flushICE(peerId, pc);
-  }
-
-  async addICE(peerId, candidate) {
-    const pc = this._pcs.get(peerId);
-    if (pc?.remoteDescription) {
-      try { await pc.addIceCandidate(candidate); } catch(_){}
-    } else {
-      if (!this._iceQueue.has(peerId)) this._iceQueue.set(peerId, []);
-      this._iceQueue.get(peerId).push(candidate);
-    }
-  }
-
-  sendTo(peerId, msg) {
-    const ch = this._channels.get(peerId);
-    if (ch?.readyState === 'open') { ch.send(JSON.stringify(msg)); return true; }
-    return false;
-  }
-
-  broadcast(msg) {
-    const raw = JSON.stringify(msg);
-    this._channels.forEach(ch => { if (ch.readyState === 'open') ch.send(raw); });
-  }
-
-  closeAll() {
-    this._hbTimers.forEach(clearInterval); this._hbTimers.clear();
-    this._pcs.forEach(pc => pc.close());   this._pcs.clear();
-    this._channels.clear(); this._lastSeen.clear(); this._iceQueue.clear();
-  }
-
-  /* ── Private ── */
-  _newPC(peerId) {
-    this._pcs.get(peerId)?.close();
-    const pc = new RTCPeerConnection({ iceServers: CONFIG.ICE_SERVERS });
-    this._pcs.set(peerId, pc);
-    this._iceQueue.set(peerId, []);
-
-    pc.onicecandidate = ({ candidate }) => {
-      if (candidate) bus.emit(EVT._ICE, { peerId, candidate });
-    };
-
-    pc.ondatachannel = ({ channel }) => this._wireChannel(peerId, channel);
-
-    pc.onconnectionstatechange = () => {
-      const s = pc.connectionState;
-      // PEER_CONNECTED is now handled by DataChannel onopen (no race condition)
-      if (['disconnected','failed','closed'].includes(s)) {
-        this._drop(peerId);
-      }
-    };
-    return pc;
-  }
-
-  _wireChannel(peerId, ch) {
-    ch.onopen = () => {
-      this._channels.set(peerId, ch);
-      // Emit PEER_CONNECTED here — channel is guaranteed open and in _channels
-      bus.emit(EVT.PEER_CONNECTED, { peerId });
-      this._startHB(peerId);
-    };
-    ch.onmessage = ({ data }) => { try { this._route(peerId, JSON.parse(data)); } catch(_){} };
-    ch.onclose   = () => this._channels.delete(peerId);
-  }
-
-  _route(peerId, msg) {
-    switch (msg.type) {
-      case MSG.HB:         this.sendTo(peerId, { type: MSG.HB_ACK }); break;
-      case MSG.HB_ACK:     this._lastSeen.set(peerId, Date.now()); break;
-      case MSG.GAME_STATE: bus.emit(EVT.GAME_STATE_UPDATED, { from: peerId, state: msg.payload }); break;
-      case MSG.ACTION:     bus.emit(EVT.ACTION_RECEIVED,    { from: peerId, action: msg.payload }); break;
-    }
-  }
-
-  _startHB(peerId) {
-    this._lastSeen.set(peerId, Date.now());
-    const t = setInterval(() => {
-      if (Date.now() - (this._lastSeen.get(peerId) || 0) > CONFIG.PEER_TIMEOUT) {
-        this._drop(peerId); return;
-      }
-      this.sendTo(peerId, { type: MSG.HB });
-    }, CONFIG.HEARTBEAT_INTERVAL);
-    this._hbTimers.set(peerId, t);
-  }
-
-  _drop(peerId) {
-    clearInterval(this._hbTimers.get(peerId)); this._hbTimers.delete(peerId);
-    this._pcs.get(peerId)?.close();            this._pcs.delete(peerId);
-    this._channels.delete(peerId);             this._lastSeen.delete(peerId);
-    bus.emit(EVT.PEER_DISCONNECTED, { peerId });
-  }
-
-  async _flushICE(peerId, pc) {
-    for (const c of (this._iceQueue.get(peerId) || []))
-      try { await pc.addIceCandidate(c); } catch(_){}
-    this._iceQueue.set(peerId, []);
-  }
-}
-
-const webrtc = new WebRTCManager();
-
-// ═══════════════════════════════════════════════════════════════════════
-// LAYER 6 ─ Signaling Communication Layer  (Firebase Realtime DB)
-// ═══════════════════════════════════════════════════════════════════════
-
-class SignalingLayer {
-  constructor() { this._db = null; this._off = []; this._iceIdx = new Map(); }
 
   init() {
     if (!firebase.apps.length) firebase.initializeApp(CONFIG.FIREBASE);
@@ -366,87 +206,102 @@ class SignalingLayer {
 
   ref(path) { return this._db.ref(path); }
 
-  async createRoom(code, hostId, hostName) {
-    await this.ref(`rooms/${code}/info`).set({ host: hostId, status: 'waiting', createdAt: Date.now() });
-    await this._addPlayer(code, hostId, hostName);
+  // ── Room operations ───────────────────────────────────
+
+  async roomExists(code) {
+    return (await this.ref('rooms/' + code + '/info').get()).exists();
   }
 
-  async roomExists(code) { return (await this.ref(`rooms/${code}/info`).get()).exists(); }
-  async getPlayers(code) { return (await this.ref(`rooms/${code}/players`).get()).val() || {}; }
-  async getHostId (code) { return (await this.ref(`rooms/${code}/info/host`).get()).val(); }
-  async setHostId (code, id) { await this.ref(`rooms/${code}/info/host`).set(id); }
+  async getPlayers(code) {
+    const snap = await this.ref('rooms/' + code + '/players').get();
+    return snap.val() || {};
+  }
 
-  async joinRoom(code, pid, name) { await this._addPlayer(code, pid, name); }
+  async getHostId(code) {
+    const snap = await this.ref('rooms/' + code + '/info/host').get();
+    return snap.val();
+  }
+
+  async setHostId(code, hostId) {
+    await this.ref('rooms/' + code + '/info/host').set(hostId);
+  }
+
+  async createRoom(code, hostId, hostName) {
+    await this.ref('rooms/' + code).set({
+      info   : { host: hostId, createdAt: Date.now() },
+      players: { [hostId]: { name: hostName, joinedAt: Date.now(), isSpectator: false } },
+    });
+    this.ref('rooms/' + code + '/players/' + hostId).onDisconnect().remove();
+    this.ref('rooms/' + code + '/info/host').onDisconnect().set(null);
+  }
+
+  async addPlayer(code, pid, name, isSpectator) {
+    await this.ref('rooms/' + code + '/players/' + pid).set({
+      name, joinedAt: Date.now(), isSpectator: !!isSpectator,
+    });
+    this.ref('rooms/' + code + '/players/' + pid).onDisconnect().remove();
+  }
 
   async removePlayer(code, pid) {
-    await Promise.all([
-      this.ref(`rooms/${code}/players/${pid}`).remove(),
-      this.ref(`rooms/${code}/offers/${pid}`).remove(),
-      this.ref(`rooms/${code}/answers/${pid}`).remove(),
-      this.ref(`rooms/${code}/ice/${pid}`).remove(),
-    ]);
+    await this.ref('rooms/' + code + '/players/' + pid).remove();
+    const remaining = await this.getPlayers(code);
+    if (Object.keys(remaining).length === 0) {
+      this.ref('rooms/' + code).remove().catch(() => {});
+    }
   }
 
+  // ── Player presence ───────────────────────────────────
+
   watchPlayers(code, onJoin, onLeave) {
-    const r = this.ref(`rooms/${code}/players`);
+    const r  = this.ref('rooms/' + code + '/players');
     const h1 = r.on('child_added',   s => onJoin(s.key, s.val()));
     const h2 = r.on('child_removed', s => onLeave(s.key));
     this._off.push(() => { r.off('child_added', h1); r.off('child_removed', h2); });
   }
 
-  async pubOffer(code, to, from, sdp) {
-    await this.ref(`rooms/${code}/offers/${to}/${from}`).set({ sdp, ts: Date.now() });
+  // ── Game state: host writes, everyone reads ───────────
+
+  pushGameState(code, game) {
+    const safe = JSON.parse(JSON.stringify(game));
+    this.ref('rooms/' + code + '/game').set(safe).catch(e => console.warn('[transport] push:', e));
   }
 
-  async pubAnswer(code, to, from, sdp) {
-    await this.ref(`rooms/${code}/answers/${to}/${from}`).set({ sdp, ts: Date.now() });
+  watchGameState(code, cb) {
+    const r = this.ref('rooms/' + code + '/game');
+    const h = r.on('value', snap => { if (snap.exists()) cb(snap.val()); });
+    this._off.push(() => r.off('value', h));
   }
 
-  watchOffers(code, myId, cb) {
-    const r = this.ref(`rooms/${code}/offers/${myId}`);
-    const h = r.on('child_added', s => { const { sdp } = s.val(); cb(s.key, sdp); s.ref.remove(); });
-    this._off.push(() => r.off('child_added', h));
+  // ── Player actions: players write, host reads ─────────
+
+  pushAction(code, action) {
+    this.ref('rooms/' + code + '/actions').push(
+      Object.assign({}, action, { ts: Date.now() })
+    ).catch(e => console.warn('[transport] action:', e));
   }
 
-  watchAnswers(code, myId, cb) {
-    const r = this.ref(`rooms/${code}/answers/${myId}`);
-    const h = r.on('child_added', s => { const { sdp } = s.val(); cb(s.key, sdp); s.ref.remove(); });
-    this._off.push(() => r.off('child_added', h));
-  }
-
-  async pubICE(code, to, from, candidate) {
-    const key = `${to}_${from}`;
-    const idx = this._iceIdx.get(key) || 0;
-    this._iceIdx.set(key, idx + 1);
-    await this.ref(`rooms/${code}/ice/${to}/${from}/${idx}`).set({
-      candidate: candidate.candidate, sdpMid: candidate.sdpMid, sdpMLineIndex: candidate.sdpMLineIndex,
-    });
-  }
-
-  watchICE(code, myId, cb) {
-    const r = this.ref(`rooms/${code}/ice/${myId}`);
+  watchActions(code, cb) {
+    const r = this.ref('rooms/' + code + '/actions');
     const h = r.on('child_added', snap => {
-      const from = snap.key;
-      const ri   = this.ref(`rooms/${code}/ice/${myId}/${from}`);
-      ri.on('child_added', cs => {
-        const d = cs.val();
-        cb(from, { candidate: d.candidate, sdpMid: d.sdpMid, sdpMLineIndex: d.sdpMLineIndex });
-        cs.ref.remove();
-      });
+      const val = snap.val();
+      if (val) { cb(val); snap.ref.remove().catch(() => {}); }
     });
     this._off.push(() => r.off('child_added', h));
   }
 
-  teardown() { this._off.forEach(fn => fn()); this._off = []; }
+  // ── Cleanup ───────────────────────────────────────────
 
-  /* private */
-  async _addPlayer(code, pid, name) {
-    await this.ref(`rooms/${code}/players/${pid}`).set({ name, joinedAt: Date.now() });
-    this.ref(`rooms/${code}/players/${pid}`).onDisconnect().remove();
+  teardown() {
+    this._off.forEach(fn => fn());
+    this._off = [];
   }
 }
 
-const signaling = new SignalingLayer();
+const transport = new FirebaseTransport();
+
+// ═══════════════════════════════════════════════════════════════════════
+// LAYER 6 ─ (Merged into FirebaseTransport)
+// ═══════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════
 // LAYER 7 ─ Room Management System
@@ -457,88 +312,91 @@ class RoomManager {
   async createRoom(playerName) {
     const myId     = Utils.genId();
     const roomCode = Utils.genRoomCode();
-    store.set({ myId, myName: playerName, roomCode, isHost: true, hostId: myId });
-    await signaling.createRoom(roomCode, myId, playerName);
-    this._listen(roomCode, myId);
+    store.set({ myId, myName: playerName, roomCode, isHost: true, hostId: myId, isSpectator: false });
+    await transport.createRoom(roomCode, myId, playerName);
+    this._listen(roomCode, myId, true);
     bus.emit(EVT.ROOM_JOINED, { roomCode });
     return roomCode;
   }
 
   async joinRoom(rawCode, playerName) {
     const roomCode = rawCode.trim().toUpperCase();
-    if (!(await signaling.roomExists(roomCode))) throw new Error('找不到此房間，請確認代碼是否正確');
-    const existing = await signaling.getPlayers(roomCode);
-    if (Object.keys(existing).length >= CONFIG.MAX_PLAYERS) throw new Error('房間已達人數上限');
 
-    const myId   = Utils.genId();
-    const hostId = await signaling.getHostId(roomCode);
-    store.set({ myId, myName: playerName, roomCode, isHost: false, hostId });
-    await signaling.joinRoom(roomCode, myId, playerName);
-    this._listen(roomCode, myId);
+    if (!(await transport.roomExists(roomCode)))
+      throw new Error('找不到此房間，請確認代碼是否正確');
 
-    // Send offers to all current members
-    for (const peerId of Object.keys(existing)) {
-      try {
-        const offer = await webrtc.createOffer(peerId);
-        await signaling.pubOffer(roomCode, peerId, myId, offer.sdp);
-      } catch(e) { console.warn('offer→', peerId, e); }
+    const existingPlayers = await transport.getPlayers(roomCode);
+    const hostId          = await transport.getHostId(roomCode);
+
+    // Bug 2 fix: zombie room detection — exists but has no players/host
+    if (!hostId || Object.keys(existingPlayers).length === 0) {
+      transport.ref('rooms/' + roomCode).remove().catch(() => {});
+      throw new Error('房間已解散，請重新建立一個新房間');
     }
 
-    bus.emit(EVT.ROOM_JOINED, { roomCode });
-    return roomCode;
+    if (Object.keys(existingPlayers).length >= CONFIG.MAX_PLAYERS)
+      throw new Error('房間已達人數上限（8人）');
+
+    // Detect mid-game join → spectator
+    const gameSnap    = await transport.ref('rooms/' + roomCode + '/game').get();
+    const gd          = gameSnap.val();
+    const isSpectator = !!(gd && gd.phase && gd.phase !== PHASE.WAITING);
+
+    const myId = Utils.genId();
+    store.set({ myId, myName: playerName, roomCode, isHost: false, hostId, isSpectator });
+    await transport.addPlayer(roomCode, myId, playerName, isSpectator);
+    this._listen(roomCode, myId, false);
+
+    bus.emit(EVT.ROOM_JOINED, { roomCode, isSpectator });
+    return { roomCode, isSpectator };
   }
 
-  /** Soft reset: keep WebRTC alive, just reset game state */
+  /** Soft reset — keep Firebase connection, just clear game state. */
   returnToLobby() {
-    store.replaceGame(makeGame());
-    const { isHost } = store.get();
-    if (isHost) gameEngine.broadcastState();
+    const { roomCode, isHost } = store.get();
+    const fresh = makeGame();
+    store.replaceGame(fresh);
+    store.set({ isSpectator: false });
+    if (isHost) transport.pushGameState(roomCode, fresh);
     bus.emit(EVT.RETURN_LOBBY);
   }
 
-  /** Hard disconnect: close everything */
+  /** Hard leave — disconnect and return to home. */
   async hardLeave() {
-    const { roomCode, myId } = store.get();
-    webrtc.closeAll();
-    signaling.teardown();
-    try { await signaling.removePlayer(roomCode, myId); } catch(_){}
+    const { roomCode, myId, isHost } = store.get();
+    transport.teardown();
+    try { await transport.removePlayer(roomCode, myId); } catch(_) {}
+    if (isHost) transport.ref('rooms/' + roomCode + '/game').remove().catch(() => {});
     store.set({
-      myId: null, myName: '', roomCode: '', isHost: false, hostId: null,
-      players: {}, game: makeGame(),
+      myId: null, myName: '', roomCode: '', isHost: false,
+      hostId: null, isSpectator: false, players: {}, game: makeGame(),
     });
   }
 
-  _listen(roomCode, myId) {
-    // Incoming WebRTC offers
-    signaling.watchOffers(roomCode, myId, async (fromId, sdp) => {
-      try {
-        const answer = await webrtc.handleOffer(fromId, sdp);
-        await signaling.pubAnswer(roomCode, fromId, myId, answer.sdp);
-      } catch(e) { console.warn('answer→', fromId, e); }
+  startWatchingActions() {
+    const { roomCode } = store.get();
+    transport.watchActions(roomCode, action => {
+      if (!store.get().isHost) return;
+      bus.emit(EVT.ACTION_RECEIVED, { action });
     });
+  }
 
-    // Answers to our offers
-    signaling.watchAnswers(roomCode, myId, async (fromId, sdp) => {
-      try { await webrtc.handleAnswer(fromId, sdp); }
-      catch(e) { console.warn('setAnswer from', fromId, e); }
-    });
-
-    // ICE candidates for us
-    signaling.watchICE(roomCode, myId, async (fromId, c) => {
-      try { await webrtc.addICE(fromId, c); } catch(_){}
-    });
-
-    // Publish our own ICE candidates
-    bus.on(EVT._ICE, async ({ peerId, candidate }) => {
-      try { await signaling.pubICE(roomCode, peerId, myId, candidate); } catch(_){}
-    });
-
-    // Player list changes
-    signaling.watchPlayers(
+  _listen(roomCode, myId, isHost) {
+    // Player presence (everyone)
+    transport.watchPlayers(
       roomCode,
-      (pid, data) => bus.emit(EVT.PLAYER_JOINED, { id: pid, name: data.name }),
+      (pid, data) => bus.emit(EVT.PLAYER_JOINED, { id: pid, name: data.name, isSpectator: !!data.isSpectator }),
       (pid)       => bus.emit(EVT.PLAYER_LEFT,   { id: pid }),
     );
+
+    // Game state: non-hosts receive from Firebase; host is the source and ignores own writes
+    transport.watchGameState(roomCode, game => {
+      if (store.get().isHost) return;
+      bus.emit(EVT.GAME_STATE_UPDATED, { state: game });
+    });
+
+    // Actions: only host processes
+    if (isHost) this.startWatchingActions();
   }
 }
 
@@ -550,76 +408,59 @@ const roomManager = new RoomManager();
 
 class PlayerSync {
   constructor() {
-    bus.on(EVT.PLAYER_JOINED,     d => this._onJoin(d));
-    bus.on(EVT.PLAYER_LEFT,       d => this._onLeave(d));
-    bus.on(EVT.PEER_CONNECTED,    d => this._onPeerUp(d));
-    bus.on(EVT.PEER_DISCONNECTED, d => this._onPeerDown(d));
+    bus.on(EVT.PLAYER_JOINED, d => this._onJoin(d));
+    bus.on(EVT.PLAYER_LEFT,   d => this._onLeave(d));
   }
 
-  _onJoin({ id, name }) {
+  _onJoin({ id, name, isSpectator }) {
     const { players, myId, myName, hostId } = store.get();
     store.set({
-      players: {
-        ...players,
-        [id]: { name: id === myId ? myName : name, status: 'connected', isHost: id === hostId },
-      },
+      players: Object.assign({}, players, {
+        [id]: {
+          name       : id === myId ? myName : name,
+          isHost     : id === hostId,
+          isSpectator: !!isSpectator,
+          status     : 'online',
+        },
+      }),
     });
-    if (id !== myId) bus.emit(EVT.TOAST, { msg: `${name} 加入了房間`, type: 'info' });
+    if (id !== myId) bus.emit(EVT.TOAST, { msg: name + ' 加入了房間', type: 'info' });
   }
 
   _onLeave({ id }) {
     const { players, hostId } = store.get();
-    const name = players[id]?.name || id;
-    const upd  = { ...players };
+    const name = (players[id] || {}).name || id;
+    const upd  = Object.assign({}, players);
     delete upd[id];
     store.set({ players: upd });
-    bus.emit(EVT.TOAST, { msg: `${name} 離開了房間`, type: 'info' });
-
-    // ── Bug-fix 1: Host migration ──────────────────────────
+    bus.emit(EVT.TOAST, { msg: name + ' 離開了房間', type: 'info' });
     if (id === hostId) this._electHost();
   }
 
-  _onPeerUp({ peerId }) {
-    const { players } = store.get();
-    if (players[peerId])
-      store.set({ players: { ...players, [peerId]: { ...players[peerId], status: 'connected' } } });
-    if (store.get().isHost) setTimeout(() => gameEngine.broadcastState(), 600);
-  }
-
-  _onPeerDown({ peerId }) {
-    const { players } = store.get();
-    if (players[peerId])
-      store.set({ players: { ...players, [peerId]: { ...players[peerId], status: 'disconnected' } } });
-    if (store.get().isHost) storyRelay.checkAllLocked();
-  }
-
   /**
-   * Deterministic host election: sort remaining IDs alphabetically,
-   * pick the first one. All peers compute the same result.
+   * Deterministic host election: all remaining clients sort IDs alphabetically
+   * and agree on the same first entry as the new host.
    */
   _electHost() {
     const { players, myId, roomCode } = store.get();
     const remaining = Object.keys(players).sort();
-    if (!remaining.length) return;
+    if (remaining.length === 0) return;
 
-    const newHostId     = remaining[0];
-    const updatedPlayers = {};
-    for (const [id, p] of Object.entries(players))
-      updatedPlayers[id] = { ...p, isHost: id === newHostId };
-
-    store.set({ hostId: newHostId, players: updatedPlayers });
+    const newHostId = remaining[0];
+    const updated   = {};
+    for (const id of Object.keys(players))
+      updated[id] = Object.assign({}, players[id], { isHost: id === newHostId });
+    store.set({ hostId: newHostId, players: updated });
 
     if (myId === newHostId) {
       store.set({ isHost: true });
       bus.emit(EVT.TOAST, { msg: '👑 你已成為新的主持人！', type: 'success' });
-      try { signaling.ref(`rooms/${roomCode}/info/host`).set(newHostId); } catch(_){}
-
+      transport.setHostId(roomCode, newHostId).catch(() => {});
+      transport.ref('rooms/' + roomCode + '/info/host').onDisconnect().set(null);
+      roomManager.startWatchingActions();
       const { game } = store.get();
-      if (game.phase === PHASE.WRITING) {
-        setTimeout(() => { storyRelay.checkAllLocked(); gameEngine.broadcastState(); }, 500);
-      } else if (game.phase !== PHASE.WAITING) {
-        setTimeout(() => gameEngine.broadcastState(), 500);
-      }
+      if (game.phase !== PHASE.WAITING)
+        setTimeout(() => gameEngine.broadcastState(), 300);
     }
   }
 }
@@ -634,35 +475,31 @@ class GameEngine {
   constructor() {
     this._timer = null;
 
-    bus.on(EVT.GAME_STATE_UPDATED, ({ from, state }) => {
-      // Bug-fix 4: only accept state from current host; ignore invalid states
-      const { hostId } = store.get();
-      if (from !== hostId) return;
-      if (!state?.phase || state.phase === PHASE.WAITING) return;
+    bus.on(EVT.GAME_STATE_UPDATED, ({ state }) => {
+      if (!state || !state.phase) return;
       store.replaceGame(state);
     });
 
-    bus.on(EVT.ACTION_RECEIVED, ({ from, action }) => {
+    bus.on(EVT.ACTION_RECEIVED, ({ action }) => {
       if (!store.get().isHost) return;
-      switch (action.type) {
-        case ACTION.LOCK:         storyRelay.handleLock(from, action.text); break;
-        case ACTION.UNLOCK:       storyRelay.handleUnlock(from); break;
-        case ACTION.REVEAL_NEXT:  storyRelay.revealNext(); break;
-        case ACTION.RETURN_LOBBY: roomManager.returnToLobby(); break;
-      }
+      const pid = action.playerId;
+      if (action.type === ACTION.LOCK)         storyRelay.handleLock(pid, action.text);
+      else if (action.type === ACTION.UNLOCK)  storyRelay.handleUnlock(pid);
+      else if (action.type === ACTION.REVEAL_NEXT)  storyRelay.revealNext();
+      else if (action.type === ACTION.RETURN_LOBBY) roomManager.returnToLobby();
     });
   }
 
-  /**
-   * Bug-fix 2: totalTurns = N × rounds so every player writes every story per round.
-   */
   startGame(settings) {
     const { players } = store.get();
-    const pids         = Object.keys(players);
-    const N            = pids.length;
-    const shuffled     = Utils.shuffle([...pids]);
-    const stories      = shuffled.map(() => []);
-    const assignments  = {};
+    const activePids  = Object.entries(players)
+      .filter(([, p]) => !p.isSpectator)
+      .map(([id]) => id);
+
+    const N           = activePids.length;
+    const shuffled    = Utils.shuffle(activePids.slice());
+    const stories     = shuffled.map(() => []);
+    const assignments = {};
     shuffled.forEach((pid, i) => { assignments[pid] = i; });
 
     store.replaceGame({
@@ -685,11 +522,11 @@ class GameEngine {
     if (settings.mode === 'time') this._startTimer(settings.turnTime);
   }
 
-  _startTimer(seconds) {
+  _startTimer(sec) {
     this.stopTimer();
-    let t = seconds;
+    let t = sec;
     this._timer = setInterval(() => {
-      t -= 1;
+      t = Math.max(0, t - 1);
       store.patchGame({ timeLeft: t });
       this.broadcastState();
       if (t <= 0) { this.stopTimer(); storyRelay.advance(); }
@@ -699,18 +536,17 @@ class GameEngine {
   stopTimer() { clearInterval(this._timer); this._timer = null; }
 
   broadcastState() {
-    if (!store.get().isHost) return;
-    webrtc.broadcast({ type: MSG.GAME_STATE, payload: store.get().game });
+    const { isHost, game, roomCode } = store.get();
+    if (!isHost) return;
+    transport.pushGameState(roomCode, game);
   }
 
-  /** Dispatch an action: host processes locally, non-host sends to host via WebRTC. */
   sendAction(action) {
-    const { isHost, myId, hostId } = store.get();
+    const { isHost, myId, roomCode } = store.get();
     if (isHost) {
-      bus.emit(EVT.ACTION_RECEIVED, { from: myId, action });
+      bus.emit(EVT.ACTION_RECEIVED, { action: Object.assign({}, action, { playerId: myId }) });
     } else {
-      if (!webrtc.sendTo(hostId, { type: MSG.ACTION, payload: action }))
-        bus.emit(EVT.TOAST, { msg: '尚未連接到主持人，請稍候', type: 'error' });
+      transport.pushAction(roomCode, Object.assign({}, action, { playerId: myId }));
     }
   }
 }
@@ -725,11 +561,11 @@ class StoryRelay {
   constructor() { this._advTimer = null; }
 
   handleLock(playerId, text) {
-    if (!text?.trim()) return;
+    if (!text || !text.trim()) return;
     const { game } = store.get();
     store.patchGame({
-      submissions: { ...game.submissions, [playerId]: text.trim() },
-      locked     : { ...game.locked,      [playerId]: true },
+      submissions: Object.assign({}, game.submissions, { [playerId]: text.trim() }),
+      locked     : Object.assign({}, game.locked,      { [playerId]: true }),
     });
     gameEngine.broadcastState();
     this.checkAllLocked();
@@ -737,40 +573,33 @@ class StoryRelay {
 
   handleUnlock(playerId) {
     const { game } = store.get();
-    const locked = { ...game.locked };
+    const locked = Object.assign({}, game.locked);
     delete locked[playerId];
     store.patchGame({ locked });
     gameEngine.broadcastState();
   }
 
-  /** If all *in-game* connected players are locked, schedule advance. */
   checkAllLocked() {
     const { game, players } = store.get();
     if (game.phase !== PHASE.WRITING) return;
-
-    // ← CRITICAL: only consider players who were part of this game (have an assignment)
-    // Mid-game joiners have no assignment and must never block the advance.
-    const active = Object.entries(players)
-      .filter(([id, p]) => p.status !== 'disconnected' && id in (game.assignments || {}))
-      .map(([id]) => id);
-
-    if (active.length > 0 && active.every(pid => game.locked[pid])) {
+    const assignments = game.assignments || {};
+    const inGame      = Object.keys(players).filter(id => id in assignments);
+    if (inGame.length > 0 && inGame.every(pid => game.locked[pid])) {
       clearTimeout(this._advTimer);
       this._advTimer = setTimeout(() => this.advance(), 900);
     }
   }
 
-  /** Advance one turn (host only). When all turns done, enter REVEALING. */
   advance() {
     gameEngine.stopTimer();
     const { game, players } = store.get();
-
-    // Commit submissions into their assigned stories
     const stories = Utils.deepClone(game.stories);
-    for (const [pid, text] of Object.entries(game.submissions)) {
-      const idx = game.assignments[pid];
+
+    for (const pid of Object.keys(game.submissions)) {
+      const text = game.submissions[pid];
+      const idx  = game.assignments[pid];
       if (idx !== undefined && text)
-        stories[idx].push({ authorId: pid, authorName: players[pid]?.name || '???', text });
+        stories[idx].push({ authorId: pid, authorName: (players[pid] || {}).name || '???', text });
     }
 
     const nextTurn = game.currentTurn + 1;
@@ -781,7 +610,6 @@ class StoryRelay {
       return;
     }
 
-    // Rotate assignments: each player moves to the next story cyclically
     const storyCount     = stories.length;
     const newAssignments = {};
     for (const pid of Object.keys(game.assignments))
@@ -793,33 +621,30 @@ class StoryRelay {
       stories,
       assignments : newAssignments,
       locked      : {},
-      submissions : {},
+      submissions  : {},
       timeLeft    : game.mode === 'time' ? game.turnTime : 0,
     });
     gameEngine.broadcastState();
     if (game.mode === 'time') gameEngine._startTimer(game.turnTime);
   }
 
-  /** Bug-fix 5: host-controlled dramatic reveal, one segment at a time. */
   revealNext() {
     const { game } = store.get();
     if (game.phase !== PHASE.REVEALING) return;
-    const maxSteps = Utils.maxRevealSteps(game.stories);
-    const newStep  = Math.min((game.reveal?.step || 0) + 1, maxSteps);
+    const max     = Utils.maxRevealSteps(game.stories);
+    const newStep = Math.min(((game.reveal || {}).step || 0) + 1, max);
     store.patchGame({ reveal: { step: newStep } });
     gameEngine.broadcastState();
-    // Auto-transition to FINISHED after final reveal
-    if (newStep >= maxSteps)
+    if (newStep >= max)
       setTimeout(() => { store.patchGame({ phase: PHASE.FINISHED }); gameEngine.broadcastState(); }, 1400);
   }
 
-  /** Return the last segment of the story currently assigned to a player. */
   getContext(playerId) {
     const { game } = store.get();
-    const idx   = game.assignments?.[playerId];
+    const idx   = (game.assignments || {})[playerId];
     if (idx === undefined) return null;
-    const story = game.stories?.[idx];
-    return story?.length ? story[story.length - 1] : null;
+    const story = (game.stories || [])[idx];
+    return story && story.length ? story[story.length - 1] : null;
   }
 }
 
@@ -831,19 +656,22 @@ const storyRelay = new StoryRelay();
 
 class UIController {
   constructor() {
-    this._screen     = 'home';
-    this._toastTimer = null;
-    this._lastTurn   = -1;
-    this._prevPhase  = PHASE.WAITING;
+    this._screen    = 'home';
+    this._toastTmr  = null;
+    this._lastTurn  = -1;
+    this._prevPhase = PHASE.WAITING;
 
     store.subscribe(s => this._sync(s));
-    bus.on(EVT.TOAST,        d => this.toast(d.msg, d.type));
-    bus.on(EVT.ROOM_JOINED,  ({ roomCode }) => { this._setText('display-room-code', roomCode); this.show('room'); });
+    bus.on(EVT.TOAST,       d  => this.toast(d.msg, d.type));
     bus.on(EVT.RETURN_LOBBY, () => this.show('room'));
 
-    // Non-host: navigate to game when host starts
+    bus.on(EVT.ROOM_JOINED, ({ roomCode }) => {
+      this._setText('display-room-code', roomCode);
+      this.show('room');
+    });
+
     bus.on(EVT.GAME_STATE_UPDATED, ({ state }) => {
-      if (!state?.phase) return;
+      if (!state || !state.phase) return;
       if (this._prevPhase === PHASE.WAITING && state.phase === PHASE.WRITING && this._screen === 'room')
         this.show('game');
       if (state.phase === PHASE.WAITING && this._screen === 'game')
@@ -852,7 +680,6 @@ class UIController {
     });
   }
 
-  /* ── Lifecycle ──────────────────────────────────────── */
   init() {
     this._bindHome();
     this._bindRoom();
@@ -860,64 +687,76 @@ class UIController {
     this.show('home');
   }
 
+  /**
+   * Switch screens AND immediately re-render with current state.
+   * Prevents blank screens when first displayed.
+   */
   show(name) {
-    document.querySelectorAll('.screen').forEach(el => { el.classList.add('hidden'); el.classList.remove('active'); });
-    const el = document.getElementById(`screen-${name}`);
+    document.querySelectorAll('.screen').forEach(el => {
+      el.classList.add('hidden');
+      el.classList.remove('active');
+    });
+    const el = document.getElementById('screen-' + name);
     if (el) { el.classList.remove('hidden'); el.classList.add('active'); }
     this._screen = name;
+    this._sync(store.get());   // force immediate render
   }
 
-  toast(msg, type = 'info') {
+  toast(msg, type) {
+    type = type || 'info';
     const t = document.getElementById('toast');
     if (!t) return;
     t.textContent = msg;
-    t.className   = `toast ${type}`;
-    clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => t.classList.add('hidden'), 3400);
+    t.className   = 'toast ' + type;
+    clearTimeout(this._toastTmr);
+    this._toastTmr = setTimeout(() => t.classList.add('hidden'), 3600);
   }
 
   overlay(msg) {
     this._setText('overlay-msg', msg);
-    document.getElementById('overlay')?.classList.remove('hidden');
+    const el = document.getElementById('overlay');
+    if (el) el.classList.remove('hidden');
   }
 
-  hideOverlay() { document.getElementById('overlay')?.classList.add('hidden'); }
+  hideOverlay() {
+    const el = document.getElementById('overlay');
+    if (el) el.classList.add('hidden');
+  }
 
-  /* ── Store sync ─────────────────────────────────────── */
+  // ── Store sync ────────────────────────────────────────
+
   _sync(s) {
     if (this._screen === 'room') {
       this._renderPlayers(s.players, s.myId, s.hostId);
       this._renderRoomControls(s);
     }
     if (this._screen === 'game') {
-      const { game } = s;
-      // Bug-fix 4: never render for WAITING or missing phase
-      if (!game?.phase || game.phase === PHASE.WAITING) return;
+      const g = s.game;
+      if (!g || !g.phase || g.phase === PHASE.WAITING) return;
       this._renderGame(s);
     }
   }
 
-  /* ── Room rendering ─────────────────────────────────── */
+  // ── Room rendering ────────────────────────────────────
+
   _renderPlayers(players, myId, hostId) {
-    const list = document.getElementById('players-list');
-    const cnt  = document.getElementById('player-count');
-    if (!list || !cnt) return;
-    const n    = Object.keys(players).length;
-    cnt.textContent = `${n} / ${CONFIG.MAX_PLAYERS}`;
-    list.innerHTML  = Object.entries(players).map(([id, p]) => {
-      const isMe   = id === myId;
+    const cnt = document.getElementById('player-count');
+    const lst = document.getElementById('players-list');
+    if (!cnt || !lst) return;
+    const n = Object.keys(players).length;
+    cnt.textContent = n + ' / ' + CONFIG.MAX_PLAYERS;
+    lst.innerHTML = Object.entries(players).map(function([id, p]) {
       const isHost = id === hostId;
-      const disc   = p.status === 'disconnected';
-      return `
-        <li class="player-item ${isHost ? 'is-host' : ''}">
-          <div class="player-avatar" style="background:${Utils.avatarColor(p.name)}">${(p.name||'?')[0]}</div>
-          <span class="player-name">${Utils.escapeHtml(p.name)}</span>
-          <div class="player-badges">
-            ${isHost ? `<span class="p-badge p-badge-host">👑 主持人</span>` : ''}
-            ${isMe   ? `<span class="p-badge p-badge-you">你</span>`         : ''}
-            <span class="p-badge ${disc ? 'p-badge-disc':'p-badge-conn'}">${disc?'離線':'在線'}</span>
-          </div>
-        </li>`;
+      const isMe   = id === myId;
+      return '<li class="player-item ' + (isHost ? 'is-host' : '') + '">' +
+        '<div class="player-avatar" style="background:' + Utils.avatarColor(p.name) + '">' + (p.name || '?')[0] + '</div>' +
+        '<span class="player-name">' + Utils.escapeHtml(p.name) + '</span>' +
+        '<div class="player-badges">' +
+          (isHost ? '<span class="p-badge p-badge-host">👑 主持人</span>' : '') +
+          (isMe   ? '<span class="p-badge p-badge-you">你</span>' : '') +
+          (p.isSpectator ? '<span class="p-badge p-badge-spec">觀戰中</span>' : '') +
+          '<span class="p-badge p-badge-conn">在線</span>' +
+        '</div></li>';
     }).join('');
   }
 
@@ -925,33 +764,38 @@ class UIController {
     this._show('settings-panel', s.isHost);
     this._show('waiting-panel', !s.isHost);
     if (s.isHost) {
-      const mode = s.settings?.mode || 'round';
+      const mode = (s.settings || {}).mode || 'round';
       document.querySelectorAll('input[name="game-mode"]').forEach(r => { r.checked = r.value === mode; });
       this._show('time-setting', mode === 'time');
     }
   }
 
-  /* ── Game rendering ─────────────────────────────────── */
+  // ── Game rendering ────────────────────────────────────
+
   _renderGame(s) {
-    const { game, players, myId, isHost } = s;
+    const { game, players, myId, isHost, isSpectator } = s;
+    const phase       = game.phase;
+    const amSpectator = isSpectator || (myId && !((game.assignments || {})[myId] !== undefined));
 
-    // Phase panel visibility (null-safe)
-    this._show('phase-writing',   game.phase === PHASE.WRITING);
-    this._show('phase-revealing', game.phase === PHASE.REVEALING);
-    this._show('phase-finished',  game.phase === PHASE.FINISHED);
+    // Show the correct phase panel
+    this._show('phase-spectating', phase === PHASE.WRITING  &&  amSpectator);
+    this._show('phase-writing',    phase === PHASE.WRITING  && !amSpectator);
+    this._show('phase-revealing',  phase === PHASE.REVEALING);
+    this._show('phase-finished',   phase === PHASE.FINISHED);
 
-    // Header
     this._renderHeader(game, players);
 
-    // Content per phase
-    if (game.phase === PHASE.WRITING)   this._renderWriting(game, myId);
-    if (game.phase === PHASE.REVEALING) this._renderRevealing(game, players, isHost);
-    if (game.phase === PHASE.FINISHED)  this._renderFinished(game);
+    if (phase === PHASE.WRITING) {
+      if (amSpectator) this._renderSpectating(game, players);
+      else             this._renderWriting(game, myId);
+    }
+    if (phase === PHASE.REVEALING) this._renderRevealing(game, players, isHost);
+    if (phase === PHASE.FINISHED)  this._renderFinished(game);
 
-    // Reset input when a new turn begins
-    if (game.phase === PHASE.WRITING && game.currentTurn !== this._lastTurn) {
+    // Reset textarea on new turn
+    if (phase === PHASE.WRITING && !amSpectator && game.currentTurn !== this._lastTurn) {
       this._lastTurn = game.currentTurn;
-      const inp  = document.getElementById('story-input');
+      const inp = document.getElementById('story-input');
       if (inp) { inp.value = ''; inp.disabled = false; }
       this._setText('char-count', '0 / 500');
       this._show('btn-lock',       true);
@@ -961,31 +805,30 @@ class UIController {
   }
 
   _renderHeader(game, players) {
-    const { turnsPerRound, currentTurn, totalRounds, mode, timeLeft, phase } = game;
+    const phase = game.phase;
 
     if (phase === PHASE.WRITING) {
-      // Bug-fix 4: guard against zero/undefined
+      const { turnsPerRound, currentTurn, totalRounds, mode, timeLeft, assignments } = game;
       if (!turnsPerRound || !currentTurn) return;
-      const round       = Math.ceil(currentTurn / turnsPerRound);
-      const turnWithin  = ((currentTurn - 1) % turnsPerRound) + 1;
-      this._setText('game-round-label', `第 ${round} / ${totalRounds} 回合`);
-      this._setText('game-turn-label',  `第 ${turnWithin} / ${turnsPerRound} 輪`);
+      const round = Math.ceil(currentTurn / turnsPerRound);
+      const tw    = ((currentTurn - 1) % turnsPerRound) + 1;
+      this._setText('game-round-label', '第 ' + round + ' / ' + totalRounds + ' 回合');
+      this._setText('game-turn-label',  '第 ' + tw    + ' / ' + turnsPerRound + ' 輪');
       this._setBadge('game-phase-badge', '寫作中', 'writing');
       this._show('header-lock-info', true);
-      // Only count players who are actually in the game (have an assignment)
-      const inGame     = Object.keys(players).filter(id => id in (game.assignments || {}));
-      const lockedInGame = inGame.filter(id => game.locked?.[id]);
-      this._setText('lock-count', `已鎖定 ${lockedInGame.length} / ${inGame.length}`);
 
-      // Timer
-      const timerEl = document.getElementById('game-timer');
-      if (timerEl) {
+      const inGame  = Object.keys(players).filter(id => (assignments || {})[id] !== undefined);
+      const locked  = inGame.filter(id => (game.locked || {})[id]);
+      this._setText('lock-count', '已鎖定 ' + locked.length + ' / ' + inGame.length);
+
+      const te = document.getElementById('game-timer');
+      if (te) {
         if (mode === 'time') {
-          timerEl.classList.remove('hidden');
-          this._setText('timer-value', String(Math.max(0, timeLeft)));
-          timerEl.classList.toggle('urgent', timeLeft <= 10);
+          te.classList.remove('hidden');
+          this._setText('timer-value', String(Math.max(0, timeLeft || 0)));
+          te.classList.toggle('urgent', (timeLeft || 0) <= 10);
         } else {
-          timerEl.classList.add('hidden');
+          te.classList.add('hidden');
         }
       }
 
@@ -994,75 +837,89 @@ class UIController {
       this._setText('game-turn-label',  '');
       this._setBadge('game-phase-badge', '揭示中', 'revealing');
       const max  = Utils.maxRevealSteps(game.stories);
-      const step = game.reveal?.step || 0;
+      const step = (game.reveal || {}).step || 0;
       this._show('header-lock-info', true);
-      this._setText('lock-count', `已揭示 ${step} / ${max} 段`);
-      document.getElementById('game-timer')?.classList.add('hidden');
+      this._setText('lock-count', '已揭示 ' + step + ' / ' + max + ' 段');
+      const te = document.getElementById('game-timer');
+      if (te) te.classList.add('hidden');
 
     } else if (phase === PHASE.FINISHED) {
       this._setText('game-round-label', '🎉 遊戲結束');
       this._setText('game-turn-label',  '');
       this._setBadge('game-phase-badge', '完結', 'finished');
       this._show('header-lock-info', false);
-      document.getElementById('game-timer')?.classList.add('hidden');
+      const te = document.getElementById('game-timer');
+      if (te) te.classList.add('hidden');
     }
   }
 
   _renderWriting(game, myId) {
-    const isSpectator = myId && !(myId in (game.assignments || {}));
-
-    // Show spectator notice for mid-game joiners, hide writing UI
-    this._show('spectator-notice', !!isSpectator);
-    this._show('writing-area',     !isSpectator);
-
-    if (isSpectator) return;   // nothing else to render for spectators
-
-    const ctx       = storyRelay.getContext(myId);
-    const ctxEl     = document.getElementById('story-context-text');
-    const inp       = document.getElementById('story-input');
-    const isLocked  = !!game.locked?.[myId];
+    const ctx      = storyRelay.getContext(myId);
+    const ctxEl    = document.getElementById('story-context-text');
+    const inp      = document.getElementById('story-input');
+    const isLocked = !!((game.locked || {})[myId]);
 
     if (ctxEl) {
       if (ctx) {
-        ctxEl.innerHTML = `<strong>${Utils.escapeHtml(ctx.authorName)}</strong> 寫道：\n\n${Utils.escapeHtml(ctx.text)}`;
+        ctxEl.innerHTML = '<strong>' + Utils.escapeHtml(ctx.authorName) + '</strong> 寫道：\n\n' + Utils.escapeHtml(ctx.text);
         ctxEl.classList.add('has-content');
       } else {
-        ctxEl.innerHTML = `<span class="context-placeholder">（故事的開端，由你來書寫！）</span>`;
+        ctxEl.innerHTML = '<span class="context-placeholder">（故事的開端，由你來書寫！）</span>';
         ctxEl.classList.remove('has-content');
       }
     }
-
     if (inp) inp.disabled = isLocked;
     this._show('btn-lock',       !isLocked);
     this._show('btn-unlock',      isLocked);
     this._show('waiting-locked',  isLocked);
   }
 
-  /** Bug-fix 5: dramatic sequential reveal */
-  _renderRevealing(game, players, isHost) {
-    const step     = game.reveal?.step || 0;
-    const stories  = game.stories  || [];
-    const maxSteps = Utils.maxRevealSteps(stories);
-    const isDone   = step >= maxSteps;
+  /** Spectator view: live game progress overview */
+  _renderSpectating(game, players) {
+    const { turnsPerRound, currentTurn, totalRounds, assignments, locked } = game;
+    if (!turnsPerRound || !currentTurn) return;
 
-    // Progress bar
-    const fill = document.getElementById('reveal-progress-fill');
-    if (fill) fill.style.width = maxSteps ? `${(step / maxSteps) * 100}%` : '0%';
+    const round = Math.ceil(currentTurn / turnsPerRound);
+    const tw    = ((currentTurn - 1) % turnsPerRound) + 1;
+    this._setText('spec-round', '第 ' + round + ' / ' + totalRounds + ' 回合 · 第 ' + tw + ' / ' + turnsPerRound + ' 輪');
 
-    // Subtitle
-    if (!isDone) {
-      const active = Utils.activeRevealStory(stories, step);
-      this._setText('reveal-subtitle', step === 0 ? '主持人將逐段揭示眾人合力創作的故事' : `正在揭示故事 ${active + 1}…`);
-    } else {
-      this._setText('reveal-subtitle', '所有故事已完整揭示！');
+    const inGame  = Object.keys(assignments || {});
+    const lockedN = inGame.filter(id => (locked || {})[id]).length;
+    this._setText('spec-lock-status', lockedN + ' / ' + inGame.length + ' 人已鎖定');
+
+    const grid = document.getElementById('spec-players-grid');
+    if (grid) {
+      grid.innerHTML = inGame.map(pid => {
+        const p      = players[pid] || {};
+        const isLock = !!((locked || {})[pid]);
+        const color  = Utils.avatarColor(p.name || pid);
+        return '<div class="spec-player-chip ' + (isLock ? 'locked' : '') + '">' +
+          '<div class="spec-avatar" style="background:' + color + '">' + (p.name || '?')[0] + '</div>' +
+          '<span class="spec-pname">' + Utils.escapeHtml(p.name || '???') + '</span>' +
+          '<span class="spec-lock-icon">' + (isLock ? '🔒' : '✏️') + '</span>' +
+        '</div>';
+      }).join('');
     }
+  }
 
-    // Buttons
+  _renderRevealing(game, players, isHost) {
+    const step    = (game.reveal || {}).step || 0;
+    const stories = game.stories || [];
+    const max     = Utils.maxRevealSteps(stories);
+    const isDone  = step >= max;
+
+    const fill = document.getElementById('reveal-progress-fill');
+    if (fill) fill.style.width = max ? (step / max * 100) + '%' : '0%';
+
+    this._setText('reveal-subtitle',
+      isDone ? '所有故事已完整揭示！'
+             : step === 0 ? '主持人將逐段揭示眾人合力創作的故事'
+                          : '正在揭示故事 ' + (Utils.activeRevealStory(stories, step) + 1) + '…');
+
     this._show('btn-reveal-next',      isHost && !isDone);
     this._show('reveal-watching-text', !isHost && !isDone);
     this._show('btn-reveal-done',      isDone);
 
-    // Story cards
     const revealedPerStory = Utils.computeReveal(stories, step);
     const activeIdx        = isDone ? -1 : Utils.activeRevealStory(stories, step);
     const cont             = document.getElementById('reveal-stories-container');
@@ -1072,141 +929,141 @@ class UIController {
       const revealed = revealedPerStory[si];
       const isActive = si === activeIdx;
       const isUnrev  = revealed.length === 0;
-
       const segsHtml = isUnrev
-        ? `<div class="reveal-seg-empty">尚未揭示</div>`
+        ? '<div class="reveal-seg-empty">尚未揭示</div>'
         : revealed.map((seg, i) => {
             const isNew = i === revealed.length - 1 && isActive;
-            return `
-              <div class="reveal-seg ${isNew ? 'r-new' : ''}">
-                <div class="reveal-seg-meta">第 ${i+1} 段 &nbsp;
-                  <span class="reveal-seg-author">${Utils.escapeHtml(seg.authorName)}</span>
-                </div>
-                <div class="reveal-seg-text">${Utils.escapeHtml(seg.text)}</div>
-              </div>`;
+            return '<div class="reveal-seg ' + (isNew ? 'r-new' : '') + '">' +
+              '<div class="reveal-seg-meta">第 ' + (i+1) + ' 段 &nbsp;<span class="reveal-seg-author">' + Utils.escapeHtml(seg.authorName) + '</span></div>' +
+              '<div class="reveal-seg-text">' + Utils.escapeHtml(seg.text) + '</div>' +
+            '</div>';
           }).join('');
-
-      return `
-        <div class="reveal-story-card ${isActive ? 'r-active' : ''} ${isUnrev ? 'r-unrevealed' : ''}">
-          <div class="reveal-story-header">
-            <span class="reveal-story-num">📖 故事 ${si+1}</span>
-            <span class="reveal-seg-count">${revealed.length} / ${story.length} 段</span>
-          </div>
-          <div class="reveal-segs">${segsHtml}</div>
-        </div>`;
+      return '<div class="reveal-story-card ' + (isActive ? 'r-active' : '') + ' ' + (isUnrev ? 'r-unrevealed' : '') + '">' +
+        '<div class="reveal-story-header"><span class="reveal-story-num">📖 故事 ' + (si+1) + '</span>' +
+        '<span class="reveal-seg-count">' + revealed.length + ' / ' + story.length + ' 段</span></div>' +
+        '<div class="reveal-segs">' + segsHtml + '</div></div>';
     }).join('');
   }
 
   _renderFinished(game) {
     const cont = document.getElementById('final-stories');
     if (!cont) return;
-    cont.innerHTML = game.stories.map((story, si) => {
+    cont.innerHTML = (game.stories || []).map((story, si) => {
       const segs = story.length === 0
-        ? `<p style="color:var(--txt2);padding:16px 20px;font-style:italic">（這個故事沒有任何內容）</p>`
-        : story.map((seg, i) => `
-            <div class="story-seg">
-              <div class="story-seg-meta">
-                第 ${i+1} 段
-                <span class="story-seg-rnd">回合 ${Math.ceil((i+1) / (game.turnsPerRound||1))}</span>
-                ${Utils.escapeHtml(seg.authorName)}
-              </div>
-              <div class="story-seg-text">${Utils.escapeHtml(seg.text)}</div>
-            </div>`).join('');
-      return `
-        <div class="story-card">
-          <div class="story-card-header">📖 故事 ${si+1}</div>
-          <div class="story-card-body">${segs}</div>
-        </div>`;
+        ? '<p style="color:var(--txt2);padding:16px 20px;font-style:italic">（這個故事沒有任何內容）</p>'
+        : story.map((seg, i) =>
+            '<div class="story-seg">' +
+              '<div class="story-seg-meta">第 ' + (i+1) + ' 段' +
+                '<span class="story-seg-rnd">回合 ' + Math.ceil((i+1) / (game.turnsPerRound || 1)) + '</span>' +
+                Utils.escapeHtml(seg.authorName) +
+              '</div>' +
+              '<div class="story-seg-text">' + Utils.escapeHtml(seg.text) + '</div>' +
+            '</div>').join('');
+      return '<div class="story-card">' +
+        '<div class="story-card-header">📖 故事 ' + (si+1) + '</div>' +
+        '<div class="story-card-body">' + segs + '</div>' +
+      '</div>';
     }).join('');
   }
 
-  /* ── Bindings ────────────────────────────────────────── */
+  // ── Bindings ──────────────────────────────────────────
+
   _bindHome() {
-    const go = async (join) => {
-      const name = document.getElementById('input-name')?.value.trim() || '';
-      if (!name) return this._err('home-error', '請先輸入暱稱');
+    var self = this;
+    var go   = async function(join) {
+      var name = (document.getElementById('input-name') || {}).value;
+      name = name ? name.trim() : '';
+      if (!name) return self._err('home-error', '請先輸入暱稱');
       if (join) {
-        const code = document.getElementById('input-room-code')?.value.trim() || '';
-        if (!code) return this._err('home-error', '請輸入房間代碼');
-        try { this.overlay('加入房間中…'); await roomManager.joinRoom(code, name); this.hideOverlay(); }
-        catch(e) { this.hideOverlay(); this._err('home-error', `加入失敗：${e.message}`); }
+        var code = (document.getElementById('input-room-code') || {}).value;
+        code = code ? code.trim() : '';
+        if (!code) return self._err('home-error', '請輸入房間代碼');
+        try   { self.overlay('加入房間中…'); await roomManager.joinRoom(code, name); self.hideOverlay(); }
+        catch (e) { self.hideOverlay(); self._err('home-error', '加入失敗：' + e.message); }
       } else {
-        try { this.overlay('建立房間中…'); await roomManager.createRoom(name); this.hideOverlay(); }
-        catch(e) { this.hideOverlay(); this._err('home-error', `建立失敗：${e.message}`); }
+        try   { self.overlay('建立房間中…'); await roomManager.createRoom(name); self.hideOverlay(); }
+        catch (e) { self.hideOverlay(); self._err('home-error', '建立失敗：' + e.message); }
       }
     };
-
-    this._on('btn-create-room', 'click', () => go(false));
-    this._on('btn-join-room',   'click', () => go(true));
-    this._on('input-room-code', 'keydown', e => { if (e.key === 'Enter') go(true); });
-    this._on('input-name',      'keydown', e => {
-      if (e.key === 'Enter')
-        document.getElementById('input-room-code')?.value.trim() ? go(true) : go(false);
+    this._on('btn-create-room', 'click', function() { go(false); });
+    this._on('btn-join-room',   'click', function() { go(true);  });
+    this._on('input-room-code', 'keydown', function(e) { if (e.key === 'Enter') go(true);  });
+    this._on('input-name',      'keydown', function(e) {
+      if (e.key === 'Enter') {
+        var c = document.getElementById('input-room-code');
+        (c && c.value.trim()) ? go(true) : go(false);
+      }
     });
   }
 
   _bindRoom() {
-    this._on('btn-copy-code', 'click', () => {
-      const code = document.getElementById('display-room-code')?.textContent || '';
-      navigator.clipboard?.writeText(code)
-        .then(() => this.toast('房間代碼已複製！', 'success'))
-        .catch(()  => this.toast(`代碼：${code}`, 'info'));
+    var self = this;
+    this._on('btn-copy-code', 'click', function() {
+      var code = (document.getElementById('display-room-code') || {}).textContent || '';
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(code)
+          .then(function() { self.toast('房間代碼已複製！', 'success'); })
+          .catch(function() { self.toast('代碼：' + code, 'info'); });
+      } else {
+        self.toast('代碼：' + code, 'info');
+      }
     });
 
-    this._on('btn-leave-room', 'click', async () => {
+    this._on('btn-leave-room', 'click', async function() {
       await roomManager.hardLeave();
-      this.show('home');
+      self.show('home');
     });
 
-    this._on('btn-start-game', 'click', () => {
-      const { players } = store.get();
-      if (Object.keys(players).length < CONFIG.MIN_PLAYERS)
-        return this._err('room-error', `至少需要 ${CONFIG.MIN_PLAYERS} 名玩家才能開始`);
+    this._on('btn-start-game', 'click', function() {
+      var players      = store.get().players;
+      var activePlayers = Object.values(players).filter(function(p) { return !p.isSpectator; });
+      if (activePlayers.length < CONFIG.MIN_PLAYERS)
+        return self._err('room-error', '至少需要 ' + CONFIG.MIN_PLAYERS + ' 名玩家才能開始');
 
-      const mode     = document.querySelector('input[name="game-mode"]:checked')?.value || 'round';
-      const rounds   = Utils.clamp(parseInt(document.getElementById('input-rounds')?.value    || 2),  1, 10);
-      const turnTime = Utils.clamp(parseInt(document.getElementById('input-turn-time')?.value || 90), 15, 300);
+      var modeEl    = document.querySelector('input[name="game-mode"]:checked');
+      var mode      = modeEl ? modeEl.value : 'round';
+      var roundsEl  = document.getElementById('input-rounds');
+      var timeEl    = document.getElementById('input-turn-time');
+      var rounds    = Utils.clamp(parseInt((roundsEl || {}).value || 2), 1, 10);
+      var turnTime  = Utils.clamp(parseInt((timeEl   || {}).value || 90), 15, 300);
 
       store.set({ settings: { mode, rounds, turnTime } });
       gameEngine.startGame({ mode, rounds, turnTime });
-      this._prevPhase = PHASE.WAITING;
-      this.show('game');
+      self._prevPhase = PHASE.WAITING;
+      self.show('game');
     });
 
-    document.querySelectorAll('input[name="game-mode"]').forEach(r => {
-      r.addEventListener('change', e => {
-        store.set({ settings: { ...store.get().settings, mode: e.target.value } });
-        this._show('time-setting', e.target.value === 'time');
+    document.querySelectorAll('input[name="game-mode"]').forEach(function(r) {
+      r.addEventListener('change', function(e) {
+        var s = store.get().settings;
+        store.set({ settings: Object.assign({}, s, { mode: e.target.value }) });
+        self._show('time-setting', e.target.value === 'time');
       });
     });
   }
 
   _bindGame() {
-    // Char counter + Enter-to-lock
-    this._on('story-input', 'input', () => {
-      const inp = document.getElementById('story-input');
-      this._setText('char-count', `${inp?.value.length || 0} / 500`);
+    var self = this;
+    this._on('story-input', 'input', function() {
+      var inp = document.getElementById('story-input');
+      self._setText('char-count', (inp ? inp.value.length : 0) + ' / 500');
     });
-    this._on('story-input', 'keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('btn-lock')?.click(); }
+    this._on('story-input', 'keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        var btn = document.getElementById('btn-lock');
+        if (btn) btn.click();
+      }
     });
-
-    // Lock / Unlock
-    this._on('btn-lock', 'click', () => {
-      const text = document.getElementById('story-input')?.value.trim() || '';
-      if (!text) return this.toast('請先輸入故事內容再鎖定', 'error');
+    this._on('btn-lock', 'click', function() {
+      var inp  = document.getElementById('story-input');
+      var text = inp ? inp.value.trim() : '';
+      if (!text) return self.toast('請先輸入故事內容再鎖定', 'error');
       gameEngine.sendAction({ type: ACTION.LOCK, text });
     });
-    this._on('btn-unlock', 'click', () => {
-      gameEngine.sendAction({ type: ACTION.UNLOCK });
-    });
-
-    // Reveal controls
-    this._on('btn-reveal-next', 'click', () => {
-      gameEngine.sendAction({ type: ACTION.REVEAL_NEXT });
-    });
-    this._on('btn-reveal-done', 'click', () => {
-      // Everyone can see finished state (host authoritative, others just navigate locally)
+    this._on('btn-unlock',      'click', function() { gameEngine.sendAction({ type: ACTION.UNLOCK      }); });
+    this._on('btn-reveal-next', 'click', function() { gameEngine.sendAction({ type: ACTION.REVEAL_NEXT }); });
+    this._on('btn-reveal-done', 'click', function() {
       if (store.get().isHost) {
         store.patchGame({ phase: PHASE.FINISHED });
         gameEngine.broadcastState();
@@ -1214,49 +1071,41 @@ class UIController {
         store.patchGame({ phase: PHASE.FINISHED });
       }
     });
-
-    // Bug-fix 3: return to lobby WITHOUT disconnecting
-    this._on('btn-back-to-lobby', 'click', () => {
-      roomManager.returnToLobby();
-    });
+    this._on('btn-back-to-lobby', 'click', function() { roomManager.returnToLobby(); });
   }
 
-  /* ── Safe DOM helpers ────────────────────────────────── */
+  // ── DOM helpers ───────────────────────────────────────
 
-  /** getElementById + null-safe addEventListener */
   _on(id, ev, fn) {
-    const el = document.getElementById(id);
+    var el = document.getElementById(id);
     if (el) el.addEventListener(ev, fn);
-    else    console.warn(`[UI] Element not found: #${id}`);
+    else console.warn('[UI] #' + id + ' not found');
   }
 
-  /** Show/hide by id (null-safe) */
   _show(id, visible) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.classList.toggle('hidden', !visible);
+    var el = document.getElementById(id);
+    if (el) el.classList.toggle('hidden', !visible);
   }
 
-  /** Set textContent by id (null-safe) */
   _setText(id, text) {
-    const el = document.getElementById(id);
+    var el = document.getElementById(id);
     if (el) el.textContent = text;
   }
 
   _setBadge(id, text, cls) {
-    const el = document.getElementById(id);
+    var el = document.getElementById(id);
     if (!el) return;
     el.textContent = text;
-    el.className   = `phase-badge ${cls}`;
+    el.className   = 'phase-badge ' + cls;
   }
 
   _err(elId, msg) {
-    const el = document.getElementById(elId);
+    var el = document.getElementById(elId);
     if (!el) return;
     el.textContent = msg;
     el.classList.remove('hidden');
     clearTimeout(el._t);
-    el._t = setTimeout(() => el.classList.add('hidden'), 5000);
+    el._t = setTimeout(function() { el.classList.add('hidden'); }, 5000);
   }
 }
 
@@ -1269,22 +1118,23 @@ class App {
 
   async init() {
     try {
-      signaling.init();
+      transport.init();
     } catch(e) {
       console.error('Firebase init error:', e);
       return;
     }
-
     this._ui.init();
 
-    window.addEventListener('beforeunload', () => {
-      const { roomCode, myId } = store.get();
-      if (roomCode && myId)
-        try { signaling.ref(`rooms/${roomCode}/players/${myId}`).remove(); } catch(_){}
+    window.addEventListener('beforeunload', function() {
+      var s = store.get();
+      if (s.roomCode && s.myId) {
+        try { transport.ref('rooms/' + s.roomCode + '/players/' + s.myId).remove(); } catch(_) {}
+        if (s.isHost) try { transport.ref('rooms/' + s.roomCode + '/info/host').set(null); } catch(_) {}
+      }
     });
 
-    console.log('%c📖 故事接龍 已啟動', 'color:#c9a84c;font-weight:bold;font-size:14px');
+    console.log('%c📖 故事接龍 已啟動 (Firebase Transport — 無 WebRTC)', 'color:#c9a84c;font-weight:bold;font-size:14px');
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => new App().init());
+document.addEventListener('DOMContentLoaded', function() { new App().init(); });

@@ -124,37 +124,48 @@
 
     <!-- ── WRITING ── -->
     <div id="phase-writing" class="game-phase hidden">
-      <!-- Spectator notice (mid-game joiners only) -->
-      <div id="spectator-notice" class="spectator-notice hidden">
-        <div class="spectator-icon">👀</div>
-        <p class="spectator-title">你是本局旁觀者</p>
-        <p class="spectator-hint">你在遊戲進行中加入，將在下一局正式參與<br>遊戲結束後可一起觀看故事揭示！</p>
+      <div class="context-section">
+        <div class="section-label">📜 上一段故事</div>
+        <div id="story-context-text" class="context-box">
+          <span class="context-placeholder">（故事的開端，由你來書寫！）</span>
+        </div>
       </div>
-      <!-- Writing UI (hidden for spectators) -->
-      <div id="writing-area">
-        <div class="context-section">
-          <div class="section-label">📜 上一段故事</div>
-          <div id="story-context-text" class="context-box">
-            <span class="context-placeholder">（故事的開端，由你來書寫！）</span>
+      <div class="writing-section">
+        <div class="section-label">✍️ 你的接龍</div>
+        <textarea id="story-input"
+          placeholder="繼續這個故事… （Enter 鎖定，Shift+Enter 換行）"
+          rows="6" maxlength="500"></textarea>
+        <div class="writing-footer">
+          <span id="char-count" class="char-counter">0 / 500</span>
+          <div class="writing-actions">
+            <button id="btn-unlock" class="btn btn-ghost hidden">🔓 解鎖修改</button>
+            <button id="btn-lock"   class="btn btn-primary">🔒 鎖定答案</button>
           </div>
         </div>
-        <div class="writing-section">
-          <div class="section-label">✍️ 你的接龍</div>
-          <textarea id="story-input"
-            placeholder="繼續這個故事… （Enter 鎖定，Shift+Enter 換行）"
-            rows="6" maxlength="500"></textarea>
-          <div class="writing-footer">
-            <span id="char-count" class="char-counter">0 / 500</span>
-            <div class="writing-actions">
-              <button id="btn-unlock" class="btn btn-ghost hidden">🔓 解鎖修改</button>
-              <button id="btn-lock"   class="btn btn-primary">🔒 鎖定答案</button>
-            </div>
-          </div>
+      </div>
+      <div id="waiting-locked" class="waiting-locked hidden">
+        <div class="spinner"></div>
+        <span>已鎖定，等待其他玩家完成…</span>
+      </div>
+    </div>
+
+    <!-- ── SPECTATING (mid-game joiners during WRITING phase) ── -->
+    <div id="phase-spectating" class="game-phase hidden">
+      <div class="spec-hero">
+        <div class="spec-glyph">👀</div>
+        <h2 class="spec-title">觀戰模式</h2>
+        <p class="spec-desc">你在遊戲進行中加入，本局以旁觀者身份參與<br>遊戲結束後將自動加入下一局！</p>
+      </div>
+      <div class="spec-status-card">
+        <div class="spec-status-row">
+          <span id="spec-round" class="spec-round-label">－</span>
+          <span id="spec-lock-status" class="spec-lock-badge">0 / 0 人已鎖定</span>
         </div>
-        <div id="waiting-locked" class="waiting-locked hidden">
-          <div class="spinner"></div>
-          <span>已鎖定，等待其他玩家完成…</span>
-        </div>
+        <div id="spec-players-grid" class="spec-players-grid"></div>
+      </div>
+      <div class="spec-waiting">
+        <div class="spinner"></div>
+        <span>等待本輪結束…</span>
       </div>
     </div>
 
