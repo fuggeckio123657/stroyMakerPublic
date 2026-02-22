@@ -1369,3 +1369,142 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }
   cursor: pointer; white-space: nowrap; transition: all .2s;
 }
 .btn-host-leave-spec:hover { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.25); }
+
+/* ══════════════════════════════════════════════════════
+   DEAD HOST CONTROL BAR
+══════════════════════════════════════════════════════ */
+.dead-host-bar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 8px 16px;
+  background: linear-gradient(90deg, rgba(139,92,246,.2), rgba(74,192,160,.2));
+  border-bottom: 1px solid rgba(139,92,246,.3);
+  backdrop-filter: blur(8px);
+}
+.dead-host-btn { font-size: .82rem; padding: 6px 16px; border-radius: 8px; }
+
+/* ══════════════════════════════════════════════════════
+   WOLFKING DEAD SECRET SHOT PANEL
+══════════════════════════════════════════════════════ */
+.dead-wk-panel {
+  margin: 0 0 14px;
+  background: linear-gradient(135deg, rgba(180,30,30,.15), rgba(255,120,50,.08));
+  border: 1.5px solid rgba(220,80,60,.35);
+  border-radius: 14px; padding: 14px 16px;
+}
+.dead-wk-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.dead-wk-icon { font-size: 1.4rem; }
+.dead-wk-title { font-family: var(--serif); font-size: 1rem; font-weight: 700; color: #fca5a5; }
+.dead-wk-hint { font-size: .75rem; color: var(--txt2); margin: 0 0 10px; }
+.dead-wk-chosen { font-size: .78rem; color: #4ac0a0; margin-top: 8px; }
+
+/* ══════════════════════════════════════════════════════
+   KNIGHT REVEAL BUTTON & BADGE
+══════════════════════════════════════════════════════ */
+.btn-warning { background: linear-gradient(135deg, #d97706, #f59e0b); color: #fff; border: none; }
+.btn-warning:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.knight-revealed-badge {
+  padding: 8px 14px; border-radius: 10px;
+  background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.3);
+  color: #fbbf24; font-size: .82rem; text-align: center;
+}
+.selected-btn { color: var(--teal) !important; border-color: var(--teal) !important; }
+.hunter-day-btn { font-size: .7rem; padding: 3px 8px; margin-left: 4px; }
+
+/* ══════════════════════════════════════════════════════
+   BOMB TOY
+══════════════════════════════════════════════════════ */
+.toy-bomb {
+  position: absolute; font-size: 2.4rem; top: 22%; left: 50%;
+  transform: translateX(-50%); cursor: pointer;
+  transition: transform .2s cubic-bezier(.34,1.56,.64,1);
+  filter: drop-shadow(0 0 8px rgba(255,100,50,.4));
+}
+.toy-bomb:hover { transform: translateX(-50%) scale(1.12); }
+.toy-fuse {
+  position: absolute; font-size: .9rem; color: #fbbf24;
+  top: 15%; left: 62%;
+  animation: fuseBurn 1.2s ease-in-out infinite alternate;
+}
+@keyframes fuseBurn { from{opacity:.4; transform:rotate(-10deg)} to{opacity:1; transform:rotate(10deg)} }
+
+/* ══════════════════════════════════════════════════════
+   KNIGHT DUEL MINI-GAME
+══════════════════════════════════════════════════════ */
+.toy-knight-game { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px; box-sizing: border-box; }
+.knight-arena {
+  position: relative; width: 100%; flex: 1;
+  border-radius: 10px; background: rgba(0,0,0,.25);
+  border: 1px solid rgba(245,158,11,.2); overflow: hidden;
+}
+.knight-hero {
+  position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+  font-size: 1.8rem; cursor: default; transition: all .15s;
+}
+.knight-attacker {
+  position: absolute; font-size: 1.4rem; cursor: pointer;
+  transition: opacity .2s, transform .2s;
+  animation: attackWobble .4s ease infinite alternate;
+}
+@keyframes attackWobble { from{transform: scale(1.2) rotate(-10deg)} to{transform: scale(1.4) rotate(10deg)} }
+.knight-score-row { display: flex; gap: 14px; font-size: .72rem; }
+.knight-score { color: #4ac0a0; font-weight: 700; }
+.knight-miss  { color: #f87171; font-weight: 700; }
+
+/* ══════════════════════════════════════════════════════
+   VILLAGER SHEEP COUNTING MINI-GAME
+══════════════════════════════════════════════════════ */
+.toy-sheep-game { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px; box-sizing: border-box; }
+.sheep-field {
+  position: relative; width: 100%; flex: 1;
+  background: linear-gradient(180deg, rgba(74,192,160,.08) 0%, rgba(0,0,0,.1) 100%);
+  border-radius: 10px; border: 1px solid rgba(74,192,160,.15); overflow: hidden;
+  display: flex; align-items: flex-end;
+}
+.sheep-fence { font-size: .6rem; color: rgba(255,255,255,.25); width: 100%; text-align: center; padding-bottom: 4px; letter-spacing: 4px; }
+.sheep-counter { font-size: .85rem; color: var(--txt1); font-family: var(--serif); }
+.sheep-jump-btn {
+  background: rgba(74,192,160,.15); border: 1px solid rgba(74,192,160,.3);
+  color: var(--teal); padding: 4px 16px; border-radius: 8px;
+  font-size: .8rem; cursor: pointer; transition: all .15s;
+}
+.sheep-jump-btn:hover:not(:disabled) { background: rgba(74,192,160,.25); transform: translateY(-1px); }
+.sheep-jump-btn:disabled { opacity: .5; cursor: default; }
+.toy-jumping-sheep {
+  position: absolute; font-size: 1.2rem; bottom: 12px;
+  animation: sheepJump .9s ease forwards;
+  pointer-events: none;
+}
+@keyframes sheepJump {
+  0%   { transform: translateX(0) translateY(0) scaleX(1); opacity: 1; }
+  35%  { transform: translateX(60px) translateY(-40px) scaleX(1); }
+  65%  { transform: translateX(120px) translateY(-20px) scaleX(1); }
+  100% { transform: translateX(200px) translateY(0) scaleX(-1); opacity: 0; }
+}
+
+/* ══════════════════════════════════════════════════════
+   KNIGHT PUBLIC REVEAL / CHALLENGE BANNER
+══════════════════════════════════════════════════════ */
+.knight-public-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; border-radius: 12px; margin-bottom: 10px;
+  font-size: .85rem; animation: knightBannerIn .4s cubic-bezier(.34,1.56,.64,1);
+}
+@keyframes knightBannerIn { from{opacity:0;transform:translateY(-8px) scale(.96)} to{opacity:1;transform:none} }
+.knight-public-banner.hidden { display: none; }
+.knight-banner-reveal  { background: rgba(245,158,11,.12); border: 1.5px solid rgba(245,158,11,.35); }
+.knight-banner-hit     { background: rgba(74,222,128,.1);  border: 1.5px solid rgba(74,222,128,.4); }
+.knight-banner-miss    { background: rgba(248,113,113,.1); border: 1.5px solid rgba(248,113,113,.35); }
+.knight-banner-icon    { font-size: 1.3rem; flex-shrink: 0; }
+.knight-banner-text    { color: var(--txt0); line-height: 1.4; }
+.knight-banner-text strong { color: #fbbf24; }
+.knight-banner-hit .knight-banner-text strong  { color: #4ade80; }
+.knight-banner-miss .knight-banner-text strong { color: #f87171; }
+
+/* Knight badge inline in player list */
+.dp-knight-badge {
+  display: inline-block; font-size: .68rem; font-weight: 700;
+  color: #fbbf24; background: rgba(245,158,11,.15);
+  border: 1px solid rgba(245,158,11,.3); border-radius: 6px;
+  padding: 1px 6px; margin-left: 4px; vertical-align: middle;
+}

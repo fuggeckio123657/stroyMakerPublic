@@ -69,7 +69,9 @@ const WW_ACTION = {
   HUNTER_LOCK      : 'ww_hunter_lock',
   HUNTER_CONFIRM   : 'ww_hunter_confirm',
   WOLFKING_SHOOT   : 'ww_wolfking_shoot',
+  KNIGHT_REVEAL    : 'ww_knight_reveal',  // knight reveals self before challenging
   KNIGHT_CHALLENGE : 'ww_knight_challenge',
+  WOLFKING_SECRET  : 'ww_wolfking_secret',// wolfking picks secret target after death
   NIGHT_DONE       : 'ww_night_done',
   VOTE             : 'ww_vote',           // select/change candidate (unlocked)
   VOTE_LOCK        : 'ww_vote_lock',      // lock your current selection
@@ -232,6 +234,10 @@ const makeWerewolfGame = () => ({
   announcement         : { peaceful: true, died: [] },
   discussReady         : {},
   knightUsed           : false,
+  knightRevealed       : false,           // knight must亮牌 before challenging
+  knightChallengeLog   : null,            // { knightId, targetId, result: 'hit'|'miss', targetRole }
+  wolfkingSecretTarget : null,            // wolfking's pending secret shot (applies next day)
+  wolfkingSecretReady  : false,           // wolfking has selected their secret target
   votes                : {},
   voteLocked           : {},             // { pid: true } — player has committed their vote
   voteTime             : 60,             // seconds for vote phase (configurable)
@@ -860,7 +866,9 @@ class WerewolfEngine {
     else if (t === WW_ACTION.HUNTER_LOCK)      this._hunterLock(pid, a.targetId);
     else if (t === WW_ACTION.HUNTER_CONFIRM)   this._hunterConfirm(pid);
     else if (t === WW_ACTION.WOLFKING_SHOOT)   this._wolfkingShoot(pid, a.targetId);
+    else if (t === WW_ACTION.KNIGHT_REVEAL)    this._knightReveal(pid);
     else if (t === WW_ACTION.KNIGHT_CHALLENGE) this._knightChallenge(pid, a.targetId);
+    else if (t === WW_ACTION.WOLFKING_SECRET)  this._wolfkingSecret(pid, a.targetId);
     else if (t === WW_ACTION.NIGHT_DONE)       this._nightDoneAck(pid);
     else if (t === WW_ACTION.VOTE)             this._voteSelect(pid, a.targetId);
     else if (t === WW_ACTION.VOTE_LOCK)        this._voteLock(pid);
@@ -1107,8 +1115,24 @@ class WerewolfEngine {
       died.push(g.hunterLock);
       deathLog[g.hunterLock] = '隨獵人一同出局';
     }
+    // Wolfking secret shot: apply if wolfking previously chose a target secretly
+    if (g.wolfkingSecretReady && g.wolfkingSecretTarget && alive[g.wolfkingSecretTarget]) {
+      alive[g.wolfkingSecretTarget] = false;
+      died.push(g.wolfkingSecretTarget);
+      deathLog[g.wolfkingSecretTarget] = '被狼王秘密帶走';
+    }
 
-    store.patchGame({ wwPhase: 'day_announce', alive, deathLog, announcement: { peaceful: died.length === 0, died } });
+    store.patchGame({
+      wwPhase: 'day_announce', alive, deathLog,
+      announcement: { peaceful: died.length === 0, died },
+      // Commit witch usage flags in case night timer resolved without _witchPass (Bug 1 fix)
+      witchAntidoteUsed: g.witchSave          ? true : g.witchAntidoteUsed,
+      witchPoisonUsed  : g.witchPoison        ? true : g.witchPoisonUsed,
+      // Clear shot target but KEEP wolfkingSecretReady=true so wolfking can't shoot again (Bug 2 fix)
+      wolfkingSecretTarget: null,
+      // Only preserve the "used" flag — don't reset to false
+      wolfkingSecretReady: g.wolfkingSecretReady,
+    });
     this.broadcast();
     // Bug 5 fix: delay win-check so death announcement has time to render
     setTimeout(() => { this._checkWin(); }, 4000);
@@ -1177,31 +1201,45 @@ class WerewolfEngine {
 
   stopVoteTimer() { clearInterval(this._voteTimer); this._voteTimer = null; }
 
+  _knightReveal(pid) {
+    const g = store.get().game;
+    if (g.wwPhase !== 'day_discuss' || !g.alive[pid]) return;
+    if (g.roles[pid] !== 'knight' || g.knightUsed || g.knightRevealed) return;
+    store.patchGame({ knightRevealed: true });
+    this.broadcast();
+  }
+
   _knightChallenge(pid, targetId) {
     const g = store.get().game;
     if (g.wwPhase !== 'day_discuss' || !g.alive[pid] || !g.alive[targetId]) return;
     if (g.roles[pid] !== 'knight' || g.knightUsed) return;
+    if (!g.knightRevealed) return; // must reveal first
 
     const targetRole = g.roles[targetId];
     const isWolf     = targetRole === 'wolf' || targetRole === 'wolfking';
     const alive      = Object.assign({}, g.alive);
     const deathLog   = Object.assign({}, g.deathLog);
+    const challengeLog = { knightId: pid, targetId, result: isWolf ? 'hit' : 'miss', targetRole };
 
     if (isWolf) {
       alive[targetId] = false;
       deathLog[targetId] = '被騎士決鬥擊殺';
       if (targetRole === 'wolfking') {
-        store.patchGame({ alive, knightUsed: true, deathLog }); this.broadcast();
-        if (!this._checkWin()) {
-          setTimeout(() => { store.patchGame({ wwPhase: 'special', specialPending: { type: 'wolfking', pid: targetId } }); this.broadcast(); }, 1500);
-        }
+        // Wolfking killed by knight in fair combat → NO secret shot
+        store.patchGame({
+          alive, knightUsed: true, deathLog, knightChallengeLog: challengeLog,
+          wolfkingSecretReady: true,    // block: mark as already used (no shot)
+          wolfkingSecretTarget: null,
+        });
+        this.broadcast();
+        this._checkWin();
         return;
       }
     } else {
       alive[pid] = false;
       deathLog[pid] = '騎士決鬥失敗出局';
     }
-    store.patchGame({ alive, knightUsed: true, deathLog });
+    store.patchGame({ alive, knightUsed: true, deathLog, knightChallengeLog: challengeLog });
     this.broadcast();
     this._checkWin();
   }
@@ -1213,7 +1251,15 @@ class WerewolfEngine {
     if (g.wwPhase !== 'vote' || !g.alive[pid]) return;
     if ((g.voteLocked || {})[pid]) return;  // already locked — can't change
     if (targetId !== VOTE_ABSTAIN_ID && (!g.alive[targetId] || pid === targetId)) return;
-    store.patchGame({ votes: Object.assign({}, g.votes, { [pid]: targetId }) });
+    // Click same target again → deselect (set to null)
+    const currentVote = (g.votes || {})[pid];
+    if (currentVote === targetId) {
+      const votes = Object.assign({}, g.votes);
+      delete votes[pid];
+      store.patchGame({ votes });
+    } else {
+      store.patchGame({ votes: Object.assign({}, g.votes, { [pid]: targetId }) });
+    }
     this.broadcast();
   }
 
@@ -1309,15 +1355,23 @@ class WerewolfEngine {
     // Delay win check so vote_result screen is visible before jumping to end
     setTimeout(() => {
       if (this._checkWin()) return;
-      if (role === 'wolfking') {
-        store.patchGame({ wwPhase: 'special', specialPending: { type: 'wolfking', pid: eliminated } }); this.broadcast();
-      } else {
-        this._startNight();
-      }
+      // Wolfking voted out already has secret shot shown on their dead overlay — just continue
+      this._startNight();
     }, 3500);
   }
 
   // ── WolfKing posthumous ───────────────────────────────
+
+  _wolfkingSecret(pid, targetId) {
+    const g = store.get().game;
+    // wolfking can pick secret target whenever they're dead and haven't chosen yet
+    if ((g.roles || {})[pid] !== 'wolfking') return;
+    if ((g.alive || {})[pid]) return;          // must be dead
+    if (g.wolfkingSecretReady) return;          // already chosen
+    if (!g.alive[targetId]) return;
+    store.patchGame({ wolfkingSecretTarget: targetId, wolfkingSecretReady: true });
+    this.broadcast();
+  }
 
   _wolfkingShoot(pid, targetId) {
     const g = store.get().game;
@@ -2111,6 +2165,11 @@ class UIController {
       wwEngine.sendAction({ type: WW_ACTION.START_DISCUSS });
     });
 
+    // Knight: reveal identity before challenging
+    this._on('btn-knight-reveal', 'click', function() {
+      wwEngine.sendAction({ type: WW_ACTION.KNIGHT_REVEAL });
+    });
+
     // All: ready to vote during discussion
     this._on('btn-ww-ready', 'click', function() {
       wwEngine.sendAction({ type: WW_ACTION.DISCUSS_READY });
@@ -2164,38 +2223,7 @@ class UIController {
       wwEngine.sendAction({ type: WW_ACTION.NIGHT_DONE });
     });
 
-    // Night toy: interactive moon clicker
-    (function() {
-      var toyMoon    = document.getElementById('toy-moon');
-      var toyMsg     = document.getElementById('toy-msg');
-      var toyScene   = document.getElementById('toy-scene');
-      var clickCount = 0;
-      var msgs = [
-        '🌕 月圓如鏡…', '🌖 月亮微醺', '🌗 半個月亮', '🌘 月漸隱去…',
-        '🌑 夜色最深', '🌒 月牙微現', '🌓 月半悄然', '🌔 月將圓滿',
-        '⭐ 星光閃爍', '✨ 許個心願…', '🌌 宇宙靜謐', '☁ 雲遮月色',
-        '🌙 月光如水', '💫 流星劃過'
-      ];
-      if (toyMoon) {
-        toyMoon.addEventListener('click', function() {
-          clickCount++;
-          var idx = (clickCount - 1) % msgs.length;
-          if (toyMsg) toyMsg.textContent = msgs[idx];
-          toyMoon.style.transform = 'scale(1.3) rotate(' + (clickCount * 37) + 'deg)';
-          setTimeout(function() { toyMoon.style.transform = ''; }, 300);
-          // Spawn a star burst
-          if (toyScene) {
-            var spark = document.createElement('div');
-            spark.className = 'toy-spark';
-            spark.textContent = ['✨','💫','⭐','🌟'][Math.floor(Math.random()*4)];
-            spark.style.left = (30 + Math.random() * 40) + '%';
-            spark.style.top  = (20 + Math.random() * 40) + '%';
-            toyScene.appendChild(spark);
-            setTimeout(function() { if (spark.parentNode) spark.parentNode.removeChild(spark); }, 700);
-          }
-        });
-      }
-    })();
+    // Night toy is now initialized dynamically in _renderWWNight based on player role
 
     // Return to lobby
     this._on('btn-ww-back-lobby', 'click', function() {
@@ -2255,6 +2283,8 @@ class UIController {
     const hasRole  = !!(g.roles || {})[myId];
     const amAlive  = !!(g.alive || {})[myId];
     const isDead   = hasRole && !amAlive && g.wwPhase !== 'end';
+    // wolfking with pending secret shot needs special UI even while dead
+    const isWolfkingDeadWithPendingShot = isDead && (g.roles||{})[myId] === 'wolfking' && !g.wolfkingSecretReady;
 
     this._renderWWHeader(g, players, myId);
 
@@ -2272,17 +2302,15 @@ class UIController {
       return;
     }
 
-      const phase = g.wwPhase;
-
-      if (phase === 'special') { this._show('ww-panel-special', true); this._renderWWSpecial(g, players, myId); }
-
-
     if (isDead && !isSpectator) {
-      this._renderWWDead(g, players, myId, isHost);
+      this._renderWWDead(g, players, myId, isHost, isWolfkingDeadWithPendingShot);
+      // Dead host still needs host control panel rendered for host-specific actions
+      // (like start discuss after a peaceful night). Render transparent floating host bar.
+      if (isHost) this._renderWWDeadHostBar(g);
       return;
     }
 
-    
+    const phase = g.wwPhase;
 
     if (phase === 'role_reveal')  { this._show('ww-panel-role-reveal', true);  this._renderWWRoleReveal(g, myId, isHost, players); }
     if (phase === 'night')        { this._show('ww-panel-night', true);         this._renderWWNight(g, myId, players); }
@@ -2290,7 +2318,7 @@ class UIController {
     if (phase === 'day_discuss')  { this._show('ww-panel-day-discuss', true);   this._renderWWDiscuss(g, players, myId, isHost, amAlive); }
     if (phase === 'vote')         { this._show('ww-panel-vote', true);          this._renderWWVote(g, players, myId, amAlive); }
     if (phase === 'vote_result')  { this._show('ww-panel-vote-result', true);   this._renderWWVoteResult(g, players); }
-    
+    if (phase === 'special')      { this._show('ww-panel-special', true);       this._renderWWSpecial(g, players, myId); }
     if (phase === 'end')          { this._show('ww-panel-end', true);           this._renderWWEnd(g, players); }
   }
 
@@ -2342,7 +2370,7 @@ class UIController {
   // Kept as no-op for compatibility; actual toggle logic is in _bindWWGame event delegation
   _initSpecToggle() {}
 
-  _renderWWDead(g, players, myId, isHost) {
+  _renderWWDead(g, players, myId, isHost, isWolfkingPending) {
     var cont = document.getElementById('ww-dead-content');
     if (!cont) return;
 
@@ -2380,15 +2408,33 @@ class UIController {
       '</div>';
     }).join('');
 
-      var hostControls = '';
-      if (isHost) {
-          if (phase === 'day_announce') {
-              hostControls = '<div style="text-align:center; padding: 16px;"><button class="btn btn-primary" onclick="wwEngine.sendAction({type:WW_ACTION.START_DISCUSS})">💬 開始討論</button></div>';
-          } else {
-              hostControls = '<div style="height: 70px;"></div>'
-          }
-      } 
-    
+    // Wolfking secret shot panel: shown only to the dead wolfking with pending shot
+    var wkSection = '';
+    if (isWolfkingPending) {
+      var alivePids = Object.keys(g.alive||{}).filter(id => g.alive[id] && id !== myId);
+      var selectedTarget = g.wolfkingSecretTarget;
+      var chips = alivePids.map(function(pid) {
+        var pp = players[pid] || {};
+        var isSel = pid === selectedTarget;
+        return '<div class="vote-chip ' + (isSel?'selected':'') + '" style="cursor:pointer"' +
+          ' onclick="wwEngine.sendAction({type:WW_ACTION.WOLFKING_SECRET,targetId:\'' + pid + '\'})">' +
+          '<div class="vote-avatar" style="background:' + Utils.avatarColor(pp.name||pid) + '">' + (pp.name||'?')[0] + '</div>' +
+          '<span>' + Utils.escapeHtml(pp.name||pid) + '</span>' +
+          (isSel ? '<span class="vote-tally">✓</span>' : '') +
+          '</div>';
+      }).join('');
+      wkSection =
+        '<div class="dead-wk-panel">' +
+          '<div class="dead-wk-header">' +
+            '<span class="dead-wk-icon">👑</span>' +
+            '<span class="dead-wk-title">狼王秘密帶走一人</span>' +
+          '</div>' +
+          '<p class="dead-wk-hint">悄悄選擇一個目標——將在下一個白天生效，無人知曉</p>' +
+          '<div class="player-vote-grid">' + chips + '</div>' +
+          (g.wolfkingSecretTarget ?
+            '<p class="dead-wk-chosen">✓ 已選擇目標，等待夜晚結束生效…</p>' : '') +
+        '</div>';
+    }
 
     cont.innerHTML =
       '<div class="dead-player-header">' +
@@ -2402,14 +2448,39 @@ class UIController {
           '<span class="dead-role-badge team-badge-' + myRole.team + '">' + myRole.icon + ' ' + myRole.name + '</span>' +
         '</div>' +
       '</div>' +
+      wkSection +
       '<div class="spectator-phase-bar">' +
         '<span class="spec-phase">' + (phaseNames[phase]||phase) + '</span>' +
         (round > 0 ? '<span class="spec-round">第 ' + round + ' 夜</span>' : '') +
       '</div>' +
       '<div class="spec-table-header"><span>玩家</span><span>存活</span><span>職業（點擊顯示）</span></div>' +
       '<div class="spectator-role-table">' + rows + '</div>' +
-        '<div class="spectator-hint">你已出局，可靜靜觀察剩餘玩家的動向。</div>'+
-     hostControls;
+      '<div class="spectator-hint">你已出局，可靜靜觀察剩餘玩家的動向。' + (isHost ? ' 主持人控制列在右上角。' : '') + '</div>';
+  }
+
+  // Dead host floating control bar — lets host manage game even after death
+  _renderWWDeadHostBar(g) {
+    var bar = document.getElementById('dead-host-bar');
+    if (!bar) return;
+    var phase = g.wwPhase;
+    bar.innerHTML = '';
+    bar.classList.remove('hidden');
+
+    if (phase === 'day_announce') {
+      var btn = document.createElement('button');
+      btn.className = 'btn btn-primary btn-sm dead-host-btn';
+      btn.textContent = '💬 開始討論';
+      btn.onclick = function() { wwEngine.sendAction({ type: WW_ACTION.START_DISCUSS }); };
+      bar.appendChild(btn);
+    } else if (phase === 'day_discuss') {
+      var btn2 = document.createElement('button');
+      btn2.className = 'btn btn-secondary btn-sm dead-host-btn';
+      btn2.textContent = '⚡ 強制投票';
+      btn2.onclick = function() { wwEngine.sendAction({ type: WW_ACTION.HOST_FORCE_VOTE }); };
+      bar.appendChild(btn2);
+    } else {
+      bar.classList.add('hidden');
+    }
   }
 
   _renderWWHeader(g, players, myId) {
@@ -2487,11 +2558,169 @@ class UIController {
     // Show waiting scene: active role done, OR passive role has confirmed
     this._show('ww-night-waiting', (isActive && amDone) || (isPassive && amDone));
 
-    // Setup passive panel icon/title
+    // Setup passive panel icon/title + role-specific toy
     if (isPassive && !amDone) {
       const roleData = ROLES[myRole] || ROLES.villager;
       this._setText('passive-role-icon', roleData.icon || '🏘️');
       this._setText('passive-role-title', roleData.name + '，請閉眼等待');
+
+      // Swap toy based on role (keyed by current role to avoid re-init)
+      const toyWrap = document.getElementById('night-toy');
+      if (toyWrap && toyWrap.getAttribute('data-toy-role') !== myRole) {
+        toyWrap.setAttribute('data-toy-role', myRole);
+
+        if (myRole === 'bomber') {
+          // 💣 Bomber: defuse the bomb game
+          toyWrap.style.width  = '220px';
+          toyWrap.style.height = '150px';
+          toyWrap.innerHTML =
+            '<div class="toy-scene" id="toy-scene">' +
+              '<div class="toy-bomb" id="toy-bomb">💣</div>' +
+              '<div class="toy-fuse" id="toy-fuse">〰</div>' +
+            '</div>' +
+            '<div class="toy-msg" id="toy-msg">點炸彈試試</div>';
+          (function() {
+            var bomb  = toyWrap.querySelector('#toy-bomb');
+            var msg   = toyWrap.querySelector('#toy-msg');
+            var scene = toyWrap.querySelector('#toy-scene');
+            var n = 0;
+            var bmsgs = ['💣 滴答…','😬 還在嗎','💣 滴答滴答…','😅 別亂按！',
+                         '🤫 裝沒事','😤 我很穩','💣 好熱…','🫠 快不行了',
+                         '🫡 使命必達','💪 我能撐住'];
+            if (bomb) bomb.addEventListener('click', function() {
+              n++;
+              if (msg) msg.textContent = bmsgs[(n-1) % bmsgs.length];
+              bomb.style.transform = 'scale(1.4) rotate('+(n*60)+'deg)';
+              setTimeout(function(){ bomb.style.transform = ''; }, 200);
+              if (scene && n % 5 === 0) {
+                var sp = document.createElement('div');
+                sp.className = 'toy-spark';
+                sp.textContent = ['💥','✨','🌟'][n%3];
+                sp.style.left = (25+Math.random()*50)+'%';
+                sp.style.top  = (20+Math.random()*40)+'%';
+                scene.appendChild(sp);
+                setTimeout(function(){ if(sp.parentNode) sp.parentNode.removeChild(sp); }, 700);
+              }
+            });
+          })();
+
+        } else if (myRole === 'knight') {
+          // ⚔️ Knight: Block incoming wolf paws — tap/click in time mini-game
+          toyWrap.style.width  = '260px';
+          toyWrap.style.height = '175px';
+          toyWrap.innerHTML =
+            '<div class="toy-knight-game" id="toy-knight-game">' +
+              '<div class="knight-arena">' +
+                '<div class="knight-hero" id="knight-hero">🛡️</div>' +
+                '<div class="knight-attacker" id="knight-attacker" style="opacity:0">🐾</div>' +
+              '</div>' +
+              '<div class="knight-score-row">' +
+                '<span class="knight-score" id="knight-score">防禦：0</span>' +
+                '<span class="knight-miss"  id="knight-miss">失誤：0</span>' +
+              '</div>' +
+              '<div class="toy-msg" id="toy-msg">點擊盾牌格擋爪子！</div>' +
+            '</div>';
+          (function() {
+            var hero     = toyWrap.querySelector('#knight-hero');
+            var attacker = toyWrap.querySelector('#knight-attacker');
+            var scoreEl  = toyWrap.querySelector('#knight-score');
+            var missEl   = toyWrap.querySelector('#knight-miss');
+            var msgEl    = toyWrap.querySelector('#toy-msg');
+            var score = 0, miss = 0, gameActive = false;
+            var swords = ['🐾','🐺','⚡','🔥'];
+            var positions = [
+              {top:'20%',left:'25%'},{top:'20%',left:'65%'},
+              {top:'55%',left:'15%'},{top:'55%',left:'60%'},
+              {top:'35%',left:'40%'}
+            ];
+            var hitMessages = ['格擋成功！','完美格擋！','反擊！','英勇！','所向披靡！'];
+            var missMessages = ['被偷了一下','沒擋住！','要小心！','再加油！'];
+
+            function launchAttack() {
+              if (!attacker) return;
+              gameActive = true;
+              var pos = positions[Math.floor(Math.random()*positions.length)];
+              attacker.textContent = swords[Math.floor(Math.random()*swords.length)];
+              attacker.style.top   = pos.top;
+              attacker.style.left  = pos.left;
+              attacker.style.opacity = '1';
+              attacker.style.transform = 'scale(1.4)';
+              var timeout = setTimeout(function() {
+                if (attacker.style.opacity === '1') {
+                  miss++;
+                  if (missEl) missEl.textContent = '失誤：' + miss;
+                  if (msgEl) msgEl.textContent = missMessages[miss % missMessages.length];
+                  if (hero) { hero.textContent = '😰'; setTimeout(function(){ hero.textContent = '🛡️'; }, 400); }
+                  attacker.style.opacity = '0';
+                  setTimeout(launchAttack, 1200 + Math.random()*600);
+                }
+              }, 1000);
+              attacker._clearTO = timeout;
+            }
+
+            if (attacker) attacker.addEventListener('click', function() {
+              if (!gameActive || attacker.style.opacity === '0') return;
+              clearTimeout(attacker._clearTO);
+              score++;
+              attacker.style.opacity  = '0';
+              attacker.style.transform= 'scale(0.3)';
+              if (scoreEl) scoreEl.textContent = '防禦：' + score;
+              if (msgEl) msgEl.textContent = hitMessages[score % hitMessages.length];
+              if (hero) { hero.textContent = '⚔️'; setTimeout(function(){ hero.textContent = '🛡️'; }, 350); }
+              setTimeout(launchAttack, 900 + Math.random()*500);
+            });
+
+            // Start game after 1s
+            setTimeout(launchAttack, 1000);
+          })();
+
+        } else {
+          // 🏘️ Villager / default: Count sheep to sleep mini-game
+          toyWrap.style.width  = '260px';
+          toyWrap.style.height = '175px';
+          toyWrap.innerHTML =
+            '<div class="toy-sheep-game" id="toy-sheep-game">' +
+              '<div class="sheep-field" id="sheep-field">' +
+                '<div class="sheep-fence">— — — — —</div>' +
+              '</div>' +
+              '<div class="sheep-counter" id="sheep-counter">🐑 0 頭羊</div>' +
+              '<div class="toy-msg" id="toy-msg">點擊 ＋ 讓羊跳過柵欄</div>' +
+              '<button class="sheep-jump-btn" id="sheep-jump-btn">🐑 跳！</button>' +
+            '</div>';
+          (function() {
+            var field      = toyWrap.querySelector('#sheep-field');
+            var counterEl  = toyWrap.querySelector('#sheep-counter');
+            var msgEl      = toyWrap.querySelector('#toy-msg');
+            var jumpBtn    = toyWrap.querySelector('#sheep-jump-btn');
+            var count = 0;
+            var drowsy  = ['還不睏','有點睏…','眼皮很重','快睡著了','Zz…','ZZZ…','zzZZzz','已入夢'];
+            var sheepFaces = ['🐑','🐏','🐑','🐑','🐑'];
+
+            function addSheep() {
+              count++;
+              if (counterEl) counterEl.textContent = '🐑 ' + count + ' 頭羊';
+              if (msgEl) msgEl.textContent = drowsy[Math.min(count - 1, drowsy.length - 1)];
+              // spawn jumping sheep animation
+              if (field) {
+                var sheep = document.createElement('div');
+                sheep.className = 'toy-jumping-sheep';
+                sheep.textContent = sheepFaces[Math.floor(Math.random()*sheepFaces.length)];
+                sheep.style.left = (10 + Math.random()*15) + 'px';
+                field.appendChild(sheep);
+                setTimeout(function(){ if(sheep.parentNode) sheep.parentNode.removeChild(sheep); }, 900);
+              }
+              if (count >= 8 && jumpBtn) {
+                jumpBtn.textContent = '💤 夢鄉了';
+                jumpBtn.disabled = true;
+              }
+            }
+
+            if (jumpBtn) jumpBtn.addEventListener('click', function() {
+              if (count < 8) addSheep();
+            });
+          })();
+        }
+      }
     }
 
     // Night progress footer
@@ -2680,8 +2909,44 @@ class UIController {
     var iReady   = !!(g.discussReady||{})[myId];
     var myRole   = (g.roles||{})[myId];
     var isKnight = myRole === 'knight' && !g.knightUsed && amAlive;
+    var isHunter = myRole === 'hunter' && amAlive;
+    var knightRevealed = !!g.knightRevealed;
+
+    // Find knight pid for public announcements
+    var knightPid = Object.keys(g.roles||{}).find(function(pid) { return g.roles[pid] === 'knight'; });
+    var knightName = knightPid ? ((players[knightPid]||{}).name || knightPid) : '騎士';
 
     this._setText('ww-ready-count', ready + ' / ' + alive.length + ' 人確認（全員確認後開始投票）');
+
+    // ── Public Knight Banner (visible to ALL players) ──────
+    var bannerEl = document.getElementById('knight-public-banner');
+    if (bannerEl) {
+      var clog = g.knightChallengeLog;
+      if (clog) {
+        // Challenge has happened — show result to everyone
+        var kName  = (players[clog.knightId]||{}).name || clog.knightId;
+        var tName  = (players[clog.targetId] ||{}).name || clog.targetId;
+        var hit    = clog.result === 'hit';
+        bannerEl.className = 'knight-public-banner ' + (hit ? 'knight-banner-hit' : 'knight-banner-miss');
+        bannerEl.innerHTML =
+          '<span class="knight-banner-icon">' + (hit ? '⚔️✨' : '⚔️💨') + '</span>' +
+          '<span class="knight-banner-text">' +
+            '<strong>' + Utils.escapeHtml(kName) + '</strong> 向 ' +
+            '<strong>' + Utils.escapeHtml(tName) + '</strong> 發起決鬥 — ' +
+            (hit ? '命中！' + (clog.targetRole === 'wolfking' ? '🐺👑 狼王倒下！' : '🐺 狼人倒下！') : '😤 決鬥失敗，騎士出局') +
+          '</span>';
+        bannerEl.classList.remove('hidden');
+      } else if (knightRevealed && knightPid) {
+        // Knight revealed but hasn't challenged yet
+        bannerEl.className = 'knight-public-banner knight-banner-reveal';
+        bannerEl.innerHTML =
+          '<span class="knight-banner-icon">⚔️</span>' +
+          '<span class="knight-banner-text"><strong>' + Utils.escapeHtml(knightName) + '</strong> 亮牌：我是騎士！準備發起決鬥…</span>';
+        bannerEl.classList.remove('hidden');
+      } else {
+        bannerEl.classList.add('hidden');
+      }
+    }
 
     var lst = document.getElementById('ww-alive-players-list');
     if (lst) {
@@ -2692,11 +2957,21 @@ class UIController {
         var seerHint = (myRole === 'seer' && seer) ?
           '<span class="seer-inline ' + seer + '">' + (seer==='good'?'✦':'⚠') + '</span>' : '';
         var isReady = !!(g.discussReady||{})[pid];
+        var isTheKnight = pid === knightPid && knightRevealed;
+        // Knight challenge button — only to knight themselves after reveal
+        var knightBtn = (isKnight && !isMe && knightRevealed) ?
+          '<button class="btn btn-xs btn-danger knight-btn" onclick="wwEngine.sendAction({type:WW_ACTION.KNIGHT_CHALLENGE,targetId:\'' + pid + '\'})">⚔ 決鬥</button>' : '';
+        // Hunter daytime re-lock button
+        var hunterBtn = (isHunter && !isMe) ?
+          '<button class="btn btn-xs btn-ghost hunter-day-btn ' + (g.hunterLock===pid?'selected-btn':'') + '" onclick="wwEngine.sendAction({type:WW_ACTION.HUNTER_LOCK,targetId:\'' + pid + '\'})">' +
+          (g.hunterLock===pid ? '🔒 鎖定中' : '🏹') + '</button>' : '';
         return '<div class="discuss-player-row ' + (isMe?'is-me':'') + '">' +
           '<div class="dp-avatar" style="background:' + Utils.avatarColor(p.name||pid) + '">' + (p.name||'?')[0] + '</div>' +
-          '<span class="dp-name">' + Utils.escapeHtml(p.name||pid) + seerHint + (isMe?' (你)':'') + '</span>' +
+          '<span class="dp-name">' + Utils.escapeHtml(p.name||pid) + seerHint + (isMe?' (你)':'') +
+          (isTheKnight ? ' <span class="dp-knight-badge">⚔️ 騎士</span>' : '') +
+          '</span>' +
           '<span class="dp-ready">' + (isReady ? '✓ 準備好了' : '⋯') + '</span>' +
-          ((isKnight && !isMe) ? '<button class="btn btn-xs btn-ghost knight-btn" onclick="wwEngine.sendAction({type:WW_ACTION.KNIGHT_CHALLENGE,targetId:\'' + pid + '\'})">⚔ 挑戰</button>' : '') +
+          knightBtn + hunterBtn +
           '</div>';
       }).join('');
     }
@@ -2706,6 +2981,17 @@ class UIController {
       readyBtn.disabled    = iReady || !amAlive;
       readyBtn.textContent = iReady ? '✓ 已確認，等待其他人…' : '✋ 我準備好了（進入投票）';
     }
+
+    // Knight: show reveal button if not yet revealed (to knight only)
+    var knightRevealBtn = document.getElementById('btn-knight-reveal');
+    if (knightRevealBtn) {
+      this._show('btn-knight-reveal', isKnight && !knightRevealed);
+    }
+    var knightRevealedBadge = document.getElementById('knight-revealed-badge');
+    if (knightRevealedBadge) {
+      this._show('knight-revealed-badge', isKnight && knightRevealed && !g.knightChallengeLog);
+    }
+
     // Host can force-start vote at any time
     this._show('btn-host-force-vote', isHost);
   }

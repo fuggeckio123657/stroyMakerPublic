@@ -322,6 +322,7 @@
 
     <!-- Dead player overlay (replaces all panels when player has died in-game) -->
     <div id="ww-dead-overlay" class="ww-spectator-overlay ww-dead-overlay hidden">
+      <div id="dead-host-bar" class="dead-host-bar hidden"></div>
       <div id="ww-dead-content" class="spectator-content"></div>
     </div>
 
@@ -439,9 +440,13 @@
         <h2>💬 討論時間</h2>
         <div id="ww-ready-count" class="ready-count-badge">0 / 0</div>
       </div>
+      <!-- Public knight reveal/challenge banner — visible to all -->
+      <div id="knight-public-banner" class="knight-public-banner hidden"></div>
       <div id="ww-alive-players-list" class="discuss-player-list"></div>
       <div class="discuss-actions">
         <button id="btn-ww-ready" class="btn btn-primary">✋ 我準備好了</button>
+        <button id="btn-knight-reveal" class="btn btn-warning hidden">⚔️ 亮牌！我是騎士（亮牌後可發起決鬥）</button>
+        <div id="knight-revealed-badge" class="knight-revealed-badge hidden">⚔️ 身份已公開 — 點選玩家旁的決鬥按鈕挑戰</div>
         <button id="btn-host-force-vote" class="btn btn-secondary btn-sm hidden">⚡ 強制進入投票</button>
       </div>
       <div id="ww-discuss-error" class="error-msg hidden"></div>
