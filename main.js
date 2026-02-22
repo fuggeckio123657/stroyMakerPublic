@@ -71,9 +71,12 @@ const WW_ACTION = {
   WOLFKING_SHOOT   : 'ww_wolfking_shoot',
   KNIGHT_CHALLENGE : 'ww_knight_challenge',
   NIGHT_DONE       : 'ww_night_done',
-  VOTE             : 'ww_vote',
-  VOTE_ABSTAIN     : 'ww_vote_abstain',
+  VOTE             : 'ww_vote',           // select/change candidate (unlocked)
+  VOTE_LOCK        : 'ww_vote_lock',      // lock your current selection
+  VOTE_UNLOCK      : 'ww_vote_unlock',    // unlock to re-select
+  VOTE_ABSTAIN     : 'ww_vote_abstain',   // abstain (auto-locks)
   DISCUSS_READY    : 'ww_discuss_ready',
+  HOST_FORCE_VOTE  : 'ww_host_force_vote',// host forces vote phase
   START_NIGHT      : 'ww_start_night',
   START_DISCUSS    : 'ww_start_discuss',
   WW_RETURN_LOBBY  : 'ww_return_lobby',
@@ -230,6 +233,9 @@ const makeWerewolfGame = () => ({
   discussReady         : {},
   knightUsed           : false,
   votes                : {},
+  voteLocked           : {},             // { pid: true } — player has committed their vote
+  voteTime             : 60,             // seconds for vote phase (configurable)
+  voteTimeLeft         : 60,             // countdown
   voteEliminated       : null,
   voteVoters           : [],
   specialPending       : null,
@@ -264,7 +270,7 @@ const store = new Store({
     rounds     : CONFIG.DEFAULT_ROUNDS,
     turnTime   : CONFIG.DEFAULT_TURN_TIME,
     maxPlayers : 12,
-    wwConfig   : { roles: { wolf:2, wolfking:0, seer:1, witch:1, hunter:1, knight:0, bomber:0 }, nightTime: 30 },
+    wwConfig   : { roles: { wolf:2, wolfking:0, seer:1, witch:1, hunter:1, knight:0, bomber:0 }, nightTime: 30, voteTime: 60 },
   },
   game       : makeGame(),
 });
@@ -696,7 +702,7 @@ class GameEngine {
       t = Math.max(0, t - 1);
       store.patchGame({ timeLeft: t });
       this.broadcastState();
-      if (t <= 0) { this.stopTimer(); setTimeout(() => storyRelay.advance(), 1500); }
+      if (t <= 0) { this.stopTimer(); setTimeout(() => storyRelay.advance(), 3000); }
     }, 1000);
   }
 
@@ -835,7 +841,7 @@ const storyRelay = new StoryRelay();
 
 class WerewolfEngine {
   constructor() {
-    this._timer = null;
+    this._timer = null; this._voteTimer = null;
     bus.on(EVT.ACTION_RECEIVED, ({ action }) => {
       if (!store.get().isHost) return;
       if ((store.get().game || {}).gameType !== 'werewolf') return;
@@ -856,9 +862,12 @@ class WerewolfEngine {
     else if (t === WW_ACTION.WOLFKING_SHOOT)   this._wolfkingShoot(pid, a.targetId);
     else if (t === WW_ACTION.KNIGHT_CHALLENGE) this._knightChallenge(pid, a.targetId);
     else if (t === WW_ACTION.NIGHT_DONE)       this._nightDoneAck(pid);
-    else if (t === WW_ACTION.VOTE)             this._vote(pid, a.targetId);
-    else if (t === WW_ACTION.VOTE_ABSTAIN)     this._vote(pid, VOTE_ABSTAIN_ID);
+    else if (t === WW_ACTION.VOTE)             this._voteSelect(pid, a.targetId);
+    else if (t === WW_ACTION.VOTE_LOCK)        this._voteLock(pid);
+    else if (t === WW_ACTION.VOTE_UNLOCK)      this._voteUnlock(pid);
+    else if (t === WW_ACTION.VOTE_ABSTAIN)     this._voteSelect(pid, VOTE_ABSTAIN_ID), this._voteLock(pid);
     else if (t === WW_ACTION.DISCUSS_READY)    this._discussReady(pid);
+    else if (t === WW_ACTION.HOST_FORCE_VOTE)  this._hostForceVote();
     else if (t === WW_ACTION.START_NIGHT)      this._startNight();
     else if (t === WW_ACTION.START_DISCUSS)    this._startDiscuss();
     else if (t === WW_ACTION.WW_RETURN_LOBBY)  roomManager.returnToLobby();
@@ -885,6 +894,8 @@ class WerewolfEngine {
     store.replaceGame(Object.assign(makeWerewolfGame(), {
       nightTime     : cfg.nightTime || 30,
       nightTimeLeft : cfg.nightTime || 30,
+      voteTime      : cfg.voteTime  || 60,
+      voteTimeLeft  : cfg.voteTime  || 60,
       roleConfig    : cfg.roles,
       roles, alive,
     }));
@@ -897,13 +908,11 @@ class WerewolfEngine {
 
   _startNight() {
     const g  = store.get().game;
+    this.stopVoteTimer(); // Clear any lingering vote timer
 
-    // Auto-confirm non-action roles (villager, knight, bomber)
+    // Passive roles (villager/bomber/knight) now confirm manually via their button.
+    // Only pre-confirm active roles that haven't checked in yet (none at start).
     const nightConfirmed = {};
-    Object.keys(g.alive).forEach(pid => {
-      if (g.alive[pid] && !NIGHT_ACTIVE_ROLES.has(g.roles[pid]))
-        nightConfirmed[pid] = true;
-    });
 
     store.patchGame({
       wwPhase              : 'night',
@@ -919,6 +928,7 @@ class WerewolfEngine {
       nightConfirmed,
       discussReady         : {},
       votes                : {},
+      voteLocked           : {},
       voteEliminated       : null,
       nightTimeLeft        : g.nightTime,
     });
@@ -1107,7 +1117,7 @@ class WerewolfEngine {
   // ── Day ───────────────────────────────────────────────
 
   _startDiscuss() {
-    store.patchGame({ wwPhase: 'day_discuss', discussReady: {}, votes: {} });
+    store.patchGame({ wwPhase: 'day_discuss', discussReady: {}, votes: {}, voteLocked: {} });
     this.broadcast();
   }
 
@@ -1118,11 +1128,54 @@ class WerewolfEngine {
     const alivePids = Object.keys(g.alive).filter(id => g.alive[id]);
     store.patchGame({ discussReady: ready });
     this.broadcast();
-    if (Object.keys(ready).length >= Math.ceil(alivePids.length / 2)) {
-      store.patchGame({ wwPhase: 'vote', votes: {} });
-      this.broadcast();
+    // All alive players confirmed → move to vote automatically
+    if (alivePids.every(id => ready[id])) {
+      this._startVote();
     }
   }
+
+  _hostForceVote() {
+    const g = store.get().game;
+    if (g.wwPhase !== 'day_discuss') return;
+    this._startVote();
+  }
+
+  _startVote() {
+    const g = store.get().game;
+    const voteTime = g.voteTime || 60;
+    store.patchGame({ wwPhase: 'vote', votes: {}, voteLocked: {}, voteTimeLeft: voteTime });
+    this.broadcast();
+    this._startVoteTimer();
+  }
+
+  _startVoteTimer() {
+    this.stopVoteTimer();
+    let t = store.get().game.voteTimeLeft || 60;
+    this._voteTimer = setInterval(() => {
+      t = Math.max(0, t - 1);
+      store.patchGame({ voteTimeLeft: t });
+      this.broadcast();
+      if (t <= 0) {
+        this.stopVoteTimer();
+        // Auto-abstain anyone who hasn't locked yet
+        const g = store.get().game;
+        const alivePids = Object.keys(g.alive).filter(id => g.alive[id]);
+        const votes     = Object.assign({}, g.votes);
+        const voteLocked = Object.assign({}, g.voteLocked);
+        alivePids.forEach(pid => {
+          if (!voteLocked[pid]) {
+            votes[pid]     = VOTE_ABSTAIN_ID;
+            voteLocked[pid]= true;
+          }
+        });
+        store.patchGame({ votes, voteLocked });
+        this.broadcast();
+        this._resolveVote();
+      }
+    }, 1000);
+  }
+
+  stopVoteTimer() { clearInterval(this._voteTimer); this._voteTimer = null; }
 
   _knightChallenge(pid, targetId) {
     const g = store.get().game;
@@ -1153,17 +1206,39 @@ class WerewolfEngine {
     this._checkWin();
   }
 
-  // ── Vote ──────────────────────────────────────────────
+  // ── Vote (lock-based) ─────────────────────────────────
 
-  _vote(pid, targetId) {
+  _voteSelect(pid, targetId) {
     const g = store.get().game;
     if (g.wwPhase !== 'vote' || !g.alive[pid]) return;
-    // Allow abstain OR vote for alive non-self player
+    if ((g.voteLocked || {})[pid]) return;  // already locked — can't change
     if (targetId !== VOTE_ABSTAIN_ID && (!g.alive[targetId] || pid === targetId)) return;
-    const votes     = Object.assign({}, g.votes, { [pid]: targetId });
+    store.patchGame({ votes: Object.assign({}, g.votes, { [pid]: targetId }) });
+    this.broadcast();
+  }
+
+  _voteLock(pid) {
+    const g = store.get().game;
+    if (g.wwPhase !== 'vote' || !g.alive[pid]) return;
+    if (!(g.votes || {})[pid]) return;  // must have selected first
+    const voteLocked = Object.assign({}, g.voteLocked, { [pid]: true });
+    store.patchGame({ voteLocked });
+    this.broadcast();
+    // Check if everyone has locked
     const alivePids = Object.keys(g.alive).filter(id => g.alive[id]);
-    store.patchGame({ votes }); this.broadcast();
-    if (alivePids.every(id => votes[id])) this._resolveVote();
+    if (alivePids.every(id => voteLocked[id])) {
+      this.stopVoteTimer();
+      this._resolveVote();
+    }
+  }
+
+  _voteUnlock(pid) {
+    const g = store.get().game;
+    if (g.wwPhase !== 'vote' || !g.alive[pid]) return;
+    const voteLocked = Object.assign({}, g.voteLocked);
+    delete voteLocked[pid];
+    store.patchGame({ voteLocked });
+    this.broadcast();
   }
 
   _resolveVote() {
@@ -1554,6 +1629,7 @@ class UIController {
       const wwCfg = settings.wwConfig || {};
       const roles  = wwCfg.roles || {};
       const nightTime = wwCfg.nightTime || 30;
+      const voteTime  = wwCfg.voteTime  || 60;
       const roleLines = Object.entries(ROLES)
         .filter(([rid]) => (roles[rid] || 0) > 0)
         .map(([rid, def]) => def.icon + ' ' + def.name + ' ×' + roles[rid])
@@ -1561,6 +1637,7 @@ class UIController {
       cont.innerHTML =
         '<div class="preview-row"><span class="preview-label">遊戲模式</span><span class="preview-val">🐺 狼人殺</span></div>' +
         '<div class="preview-row"><span class="preview-label">夜晚時限</span><span class="preview-val">' + nightTime + ' 秒</span></div>' +
+        '<div class="preview-row"><span class="preview-label">投票時限</span><span class="preview-val">' + voteTime + ' 秒</span></div>' +
         '<div class="preview-row preview-roles"><span class="preview-label">職業設定</span><span class="preview-val">' + (roleLines || '未設定') + '</span></div>';
     }
   }
@@ -1893,6 +1970,8 @@ class UIController {
       var roles   = Object.assign({}, (wwCfg.roles) || {});
       var nte     = document.getElementById('ww-night-time');
       var nightTime = Utils.clamp(parseInt((nte || {}).value || 30), 15, 90);
+      var vte     = document.getElementById('ww-vote-time');
+      var voteTime = Utils.clamp(parseInt((vte || {}).value || 60), 20, 180);
 
       var wolfCount = (roles.wolf || 0) + (roles.wolfking || 0);
       if (wolfCount < 1) return self._err('room-error', '至少需要設定 1 名狼人或狼王');
@@ -1900,8 +1979,8 @@ class UIController {
       var totalConfig = Object.values(roles).reduce(function(a, b) { return a + b; }, 0);
       if (totalConfig > n) return self._err('room-error', '職業總數（' + totalConfig + '）超過玩家數（' + n + '），請減少職業數量');
 
-      store.set({ settings: Object.assign({}, s, { wwConfig: Object.assign({}, wwCfg, { roles, nightTime }) }) });
-      wwEngine.startGame({ roles, nightTime });
+      store.set({ settings: Object.assign({}, s, { wwConfig: Object.assign({}, wwCfg, { roles, nightTime, voteTime }) }) });
+      wwEngine.startGame({ roles, nightTime, voteTime });
 
       // Navigate host immediately, then render with final game state
       document.querySelectorAll('.screen').forEach(function(el) {
@@ -1963,7 +2042,10 @@ class UIController {
     // Voluntary spectator toggle (enter or exit spectator mode for all players including host)
     this._on('btn-toggle-spectator', 'click', async function() {
       var s = store.get();
-      var newVal = !s.isSpectator;
+      // Read actual spectator state from player record (most reliable source)
+      var myPlayer = (s.players || {})[s.myId] || {};
+      var currentSpec = !!(s.isSpectator || myPlayer.isSpectator);
+      var newVal = !currentSpec;
       store.set({ isSpectator: newVal });
       await transport.updatePlayerSpectator(s.roomCode, s.myId, newVal);
       self._renderPlayers(store.get().players, s.myId, s.hostId);
@@ -2057,10 +2139,63 @@ class UIController {
     // Knight: challenge (toggled via discussion panel rebuild on render)
     // Handled via dynamic onclick in grid items
 
-    // Vote: abstain
+    // Vote: abstain (now also auto-locks)
     this._on('btn-vote-abstain', 'click', function() {
       wwEngine.sendAction({ type: WW_ACTION.VOTE_ABSTAIN });
     });
+
+    // Vote: lock selection
+    this._on('btn-vote-lock', 'click', function() {
+      wwEngine.sendAction({ type: WW_ACTION.VOTE_LOCK });
+    });
+
+    // Vote: unlock selection
+    this._on('btn-vote-unlock', 'click', function() {
+      wwEngine.sendAction({ type: WW_ACTION.VOTE_UNLOCK });
+    });
+
+    // Host: force start vote
+    this._on('btn-host-force-vote', 'click', function() {
+      wwEngine.sendAction({ type: WW_ACTION.HOST_FORCE_VOTE });
+    });
+
+    // Passive night roles: confirm done (villager/bomber/knight)
+    this._on('btn-passive-done', 'click', function() {
+      wwEngine.sendAction({ type: WW_ACTION.NIGHT_DONE });
+    });
+
+    // Night toy: interactive moon clicker
+    (function() {
+      var toyMoon    = document.getElementById('toy-moon');
+      var toyMsg     = document.getElementById('toy-msg');
+      var toyScene   = document.getElementById('toy-scene');
+      var clickCount = 0;
+      var msgs = [
+        '🌕 月圓如鏡…', '🌖 月亮微醺', '🌗 半個月亮', '🌘 月漸隱去…',
+        '🌑 夜色最深', '🌒 月牙微現', '🌓 月半悄然', '🌔 月將圓滿',
+        '⭐ 星光閃爍', '✨ 許個心願…', '🌌 宇宙靜謐', '☁ 雲遮月色',
+        '🌙 月光如水', '💫 流星劃過'
+      ];
+      if (toyMoon) {
+        toyMoon.addEventListener('click', function() {
+          clickCount++;
+          var idx = (clickCount - 1) % msgs.length;
+          if (toyMsg) toyMsg.textContent = msgs[idx];
+          toyMoon.style.transform = 'scale(1.3) rotate(' + (clickCount * 37) + 'deg)';
+          setTimeout(function() { toyMoon.style.transform = ''; }, 300);
+          // Spawn a star burst
+          if (toyScene) {
+            var spark = document.createElement('div');
+            spark.className = 'toy-spark';
+            spark.textContent = ['✨','💫','⭐','🌟'][Math.floor(Math.random()*4)];
+            spark.style.left = (30 + Math.random() * 40) + '%';
+            spark.style.top  = (20 + Math.random() * 40) + '%';
+            toyScene.appendChild(spark);
+            setTimeout(function() { if (spark.parentNode) spark.parentNode.removeChild(spark); }, 700);
+          }
+        });
+      }
+    })();
 
     // Return to lobby
     this._on('btn-ww-back-lobby', 'click', function() {
@@ -2137,8 +2272,10 @@ class UIController {
       return;
     }
 
-    if (isDead && !isSpectator) {
-      this._renderWWDead(g, players, myId);
+    var isSpecialActor = (g.wwPhase === 'special' && g.specialActor === myId);
+
+    if (isDead && !isSpectator && !isSpecialActor) {
+      this._renderWWDead(g, players, myId, isHost);
       return;
     }
 
@@ -2202,7 +2339,7 @@ class UIController {
   // Kept as no-op for compatibility; actual toggle logic is in _bindWWGame event delegation
   _initSpecToggle() {}
 
-  _renderWWDead(g, players, myId) {
+  _renderWWDead(g, players, myId, isHost) {
     var cont = document.getElementById('ww-dead-content');
     if (!cont) return;
 
@@ -2240,6 +2377,16 @@ class UIController {
       '</div>';
     }).join('');
 
+      var hostControls = '';
+      if (isHost) {
+          if (phase === 'day_announce') {
+              hostControls = '<div style="text-align:center; padding: 16px;"><button class="btn btn-primary" onclick="wwEngine.sendAction({type:WW_ACTION.START_DISCUSS})">💬 開始討論</button></div>';
+          } else {
+              hostControls = '<div style="height: 70px;"></div>'
+          }
+      } 
+    
+
     cont.innerHTML =
       '<div class="dead-player-header">' +
         '<div class="dead-skull-big">💀</div>' +
@@ -2258,7 +2405,8 @@ class UIController {
       '</div>' +
       '<div class="spec-table-header"><span>玩家</span><span>存活</span><span>職業（點擊顯示）</span></div>' +
       '<div class="spectator-role-table">' + rows + '</div>' +
-      '<div class="spectator-hint">你已出局，可靜靜觀察剩餘玩家的動向。</div>';
+        '<div class="spectator-hint">你已出局，可靜靜觀察剩餘玩家的動向。</div>'+
+     hostControls;
   }
 
   _renderWWHeader(g, players, myId) {
@@ -2325,13 +2473,23 @@ class UIController {
     const amHunter = myRole === 'hunter';
     const isActive = NIGHT_ACTIVE_ROLES.has(myRole);
     const amDone   = !!(g.nightConfirmed || {})[myId];
+    const isPassive = !isActive; // villager, bomber, knight
 
     // Each player sees only their own panel simultaneously
     this._show('ww-night-wolf',    amWolf   && !amDone);
     this._show('ww-night-seer',    amSeer   && !amDone);
     this._show('ww-night-witch',   amWitch  && !amDone);
     this._show('ww-night-hunter',  amHunter && !amDone);
-    this._show('ww-night-waiting', !isActive || amDone);
+    this._show('ww-night-passive', isPassive && !amDone);
+    // Show waiting scene: active role done, OR passive role has confirmed
+    this._show('ww-night-waiting', (isActive && amDone) || (isPassive && amDone));
+
+    // Setup passive panel icon/title
+    if (isPassive && !amDone) {
+      const roleData = ROLES[myRole] || ROLES.villager;
+      this._setText('passive-role-icon', roleData.icon || '🏘️');
+      this._setText('passive-role-title', roleData.name + '，請閉眼等待');
+    }
 
     // Night progress footer
     const alivePids   = Object.keys(g.alive||{}).filter(id => g.alive[id]);
@@ -2516,12 +2674,11 @@ class UIController {
   _renderWWDiscuss(g, players, myId, isHost, amAlive) {
     var alive    = Object.keys(g.alive||{}).filter(id => g.alive[id]);
     var ready    = Object.keys(g.discussReady||{}).length;
-    var needed   = Math.ceil(alive.length / 2);
     var iReady   = !!(g.discussReady||{})[myId];
     var myRole   = (g.roles||{})[myId];
     var isKnight = myRole === 'knight' && !g.knightUsed && amAlive;
 
-    this._setText('ww-ready-count', ready + ' / ' + alive.length + ' 人準備好（需 ' + needed + ' 人）');
+    this._setText('ww-ready-count', ready + ' / ' + alive.length + ' 人確認（全員確認後開始投票）');
 
     var lst = document.getElementById('ww-alive-players-list');
     if (lst) {
@@ -2531,9 +2688,11 @@ class UIController {
         var seer = (g.seerResults||{})[pid];
         var seerHint = (myRole === 'seer' && seer) ?
           '<span class="seer-inline ' + seer + '">' + (seer==='good'?'✦':'⚠') + '</span>' : '';
+        var isReady = !!(g.discussReady||{})[pid];
         return '<div class="discuss-player-row ' + (isMe?'is-me':'') + '">' +
           '<div class="dp-avatar" style="background:' + Utils.avatarColor(p.name||pid) + '">' + (p.name||'?')[0] + '</div>' +
           '<span class="dp-name">' + Utils.escapeHtml(p.name||pid) + seerHint + (isMe?' (你)':'') + '</span>' +
+          '<span class="dp-ready">' + (isReady ? '✓ 準備好了' : '⋯') + '</span>' +
           ((isKnight && !isMe) ? '<button class="btn btn-xs btn-ghost knight-btn" onclick="wwEngine.sendAction({type:WW_ACTION.KNIGHT_CHALLENGE,targetId:\'' + pid + '\'})">⚔ 挑戰</button>' : '') +
           '</div>';
       }).join('');
@@ -2542,19 +2701,32 @@ class UIController {
     var readyBtn = document.getElementById('btn-ww-ready');
     if (readyBtn) {
       readyBtn.disabled    = iReady || !amAlive;
-      readyBtn.textContent = iReady ? '✓ 已準備好' : '✋ 我準備好了';
+      readyBtn.textContent = iReady ? '✓ 已確認，等待其他人…' : '✋ 我準備好了（進入投票）';
     }
+    // Host can force-start vote at any time
+    this._show('btn-host-force-vote', isHost);
   }
 
   _renderWWVote(g, players, myId, amAlive) {
     var alive        = Object.keys(g.alive||{}).filter(id => g.alive[id]);
-    var totalVoted   = Object.keys(g.votes||{}).length;
+    var lockedCount  = Object.keys(g.voteLocked||{}).filter(id => g.alive[id]).length;
     var myVote       = (g.votes||{})[myId];
-    var iVoted       = !!myVote;
+    var myLocked     = !!(g.voteLocked||{})[myId];
     var iAbstained   = myVote === VOTE_ABSTAIN_ID;
     var abstainCount = Object.values(g.votes||{}).filter(v => v === VOTE_ABSTAIN_ID).length;
 
-    this._setText('ww-vote-count', totalVoted + ' / ' + alive.length + ' 人已投票' +
+    // Timer
+    var voteTime  = g.voteTime || 60;
+    var timeLeft  = (g.voteTimeLeft !== undefined) ? g.voteTimeLeft : voteTime;
+    var timerEl   = document.getElementById('ww-vote-time-left');
+    if (timerEl) timerEl.textContent = timeLeft;
+    var timerWrap = document.getElementById('ww-vote-timer');
+    if (timerWrap) timerWrap.classList.toggle('urgent', timeLeft <= 10);
+    // Progress bar
+    var bar = document.getElementById('ww-vote-bar');
+    if (bar) bar.style.width = Math.max(0, (timeLeft / voteTime) * 100) + '%';
+
+    this._setText('ww-vote-count', lockedCount + ' / ' + alive.length + ' 人已鎖定' +
       (abstainCount > 0 ? '（棄票 ' + abstainCount + '）' : ''));
 
     var grid = document.getElementById('ww-vote-grid');
@@ -2563,13 +2735,14 @@ class UIController {
         var p        = players[pid] || {};
         var isMe     = pid === myId;
         var votedFor = Object.values(g.votes||{}).filter(v => v === pid).length;
+        var lockedFor = Object.keys(g.voteLocked||{}).filter(id => (g.votes||{})[id] === pid && (g.voteLocked||{})[id]).length;
         var iSelected = myVote === pid;
-        var canClick  = !iVoted && amAlive && !isMe;
-        return '<div class="vote-chip ' + (iSelected?'selected':'') + (isMe?' self':'') + '"' +
+        var canClick  = !myLocked && amAlive && !isMe;
+        return '<div class="vote-chip ' + (iSelected?'selected':'') + (isMe?' self':'') + (myLocked&&iSelected?' locked':'') + '"' +
           (canClick ? ' onclick="wwEngine.sendAction({type:WW_ACTION.VOTE,targetId:\'' + pid + '\'})"' : '') + '>' +
           '<div class="vote-avatar" style="background:' + Utils.avatarColor(p.name||pid) + '">' + (p.name||'?')[0] + '</div>' +
           '<span>' + Utils.escapeHtml(p.name||pid) + (isMe?' (你)':'') + '</span>' +
-          (votedFor > 0 ? '<span class="vote-tally">' + votedFor + '票</span>' : '') +
+          (votedFor > 0 ? '<span class="vote-tally">' + votedFor + '票 <small>(' + lockedFor + '🔒)</small></span>' : '') +
           '</div>';
       }).join('');
     }
@@ -2577,11 +2750,19 @@ class UIController {
     // Abstain button
     var ab = document.getElementById('btn-vote-abstain');
     if (ab) {
-      ab.disabled    = iVoted && !iAbstained;
+      ab.disabled    = myLocked;
       ab.className   = 'btn vote-abstain-btn' + (iAbstained ? ' abstained' : '');
-      ab.textContent = iAbstained ? '🚫 已棄票' : '棄票（不投任何人）';
+      ab.textContent = iAbstained ? '🚫 已選擇棄票' : '棄票（不投任何人）';
     }
-    this._show('vote-abstain-area', !!(amAlive));
+    this._show('vote-abstain-area', amAlive && !myLocked);
+
+    // Lock / Unlock buttons
+    var hasSelection = !!myVote;
+    this._show('btn-vote-lock',   amAlive && !myLocked && hasSelection);
+    this._show('btn-vote-unlock', amAlive && myLocked);
+
+    var lockBtn = document.getElementById('btn-vote-lock');
+    if (lockBtn) lockBtn.textContent = iAbstained ? '🔒 確認棄票' : '🔒 確認鎖定投票';
   }
 
   _renderWWVoteResult(g, players) {

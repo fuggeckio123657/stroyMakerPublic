@@ -188,6 +188,10 @@
             <label for="ww-night-time">夜晚行動時限（秒）</label>
             <input type="number" id="ww-night-time" value="30" min="15" max="90">
           </div>
+          <div class="form-group">
+            <label for="ww-vote-time">投票計時時限（秒）</label>
+            <input type="number" id="ww-vote-time" value="60" min="20" max="180">
+          </div>
           <button id="btn-start-ww" class="btn btn-primary btn-full ww-start-btn">開始狼人殺 🐺</button>
         </div>
 
@@ -391,6 +395,29 @@
           <p class="night-wait-hint">請閉上眼睛，靜靜等待…</p>
         </div>
       </div>
+      <!-- Passive player night panel (villager/bomber/knight) -->
+      <div id="ww-night-passive" class="night-subpanel hidden">
+        <div class="night-header">
+          <div class="night-moon" id="passive-role-icon">🏘️</div>
+          <h2 id="passive-role-title">請閉眼等待</h2>
+          <p class="night-hint">夜晚降臨，靜靜等候黎明…</p>
+        </div>
+        <!-- Interactive night toy -->
+        <div class="night-toy-wrap">
+          <div class="night-toy" id="night-toy" title="點我互動">
+            <div class="toy-scene" id="toy-scene">
+              <div class="toy-star ts1">✦</div><div class="toy-star ts2">✧</div>
+              <div class="toy-star ts3">✦</div><div class="toy-star ts4">✧</div>
+              <div class="toy-moon" id="toy-moon">🌕</div>
+              <div class="toy-cloud tc1">☁</div><div class="toy-cloud tc2">☁</div>
+            </div>
+            <div class="toy-msg" id="toy-msg">點擊月亮</div>
+          </div>
+        </div>
+        <div class="night-footer">
+          <button id="btn-passive-done" class="btn btn-ghost">✓ 我已閉眼，確認等待</button>
+        </div>
+      </div>
       <div class="night-panel-footer">
         <div id="ww-night-progress" class="night-progress-text">等待夜晚行動…</div>
       </div>
@@ -415,6 +442,7 @@
       <div id="ww-alive-players-list" class="discuss-player-list"></div>
       <div class="discuss-actions">
         <button id="btn-ww-ready" class="btn btn-primary">✋ 我準備好了</button>
+        <button id="btn-host-force-vote" class="btn btn-secondary btn-sm hidden">⚡ 強制進入投票</button>
       </div>
       <div id="ww-discuss-error" class="error-msg hidden"></div>
     </div>
@@ -423,12 +451,20 @@
     <div id="ww-panel-vote" class="ww-panel hidden">
       <div class="vote-header">
         <h2>🗳️ 投票放逐</h2>
-        <p class="vote-hint">選擇你認為是狼人的玩家，或棄票</p>
-        <div id="ww-vote-count" class="ready-count-badge">0 / 0</div>
+        <div class="vote-header-row">
+          <div id="ww-vote-timer" class="vote-countdown">⏱ <span id="ww-vote-time-left">--</span>s</div>
+          <div id="ww-vote-count" class="ready-count-badge">0 / 0</div>
+        </div>
+        <div id="ww-vote-bar-wrap" class="vote-timer-bar-wrap"><div id="ww-vote-bar" class="vote-timer-bar"></div></div>
+        <p class="vote-hint">選擇目標後按「鎖定」確認。鎖定前可隨時更換。</p>
       </div>
       <div id="ww-vote-grid" class="player-vote-grid vote-mode"></div>
       <div id="vote-abstain-area" class="vote-abstain-area">
         <button id="btn-vote-abstain" class="btn vote-abstain-btn">棄票（不投任何人）</button>
+      </div>
+      <div class="vote-lock-row">
+        <button id="btn-vote-lock" class="btn btn-primary vote-lock-btn hidden">🔒 確認鎖定投票</button>
+        <button id="btn-vote-unlock" class="btn btn-ghost vote-lock-btn hidden">🔓 解除鎖定（重新選擇）</button>
       </div>
     </div>
 
