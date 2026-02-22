@@ -2272,14 +2272,17 @@ class UIController {
       return;
     }
 
-    var isSpecialActor = (g.wwPhase === 'special' && g.specialActor === myId);
+      const phase = g.wwPhase;
 
-    if (isDead && !isSpectator && !isSpecialActor) {
+      if (phase === 'special') { this._show('ww-panel-special', true); this._renderWWSpecial(g, players, myId); }
+
+
+    if (isDead && !isSpectator) {
       this._renderWWDead(g, players, myId, isHost);
       return;
     }
 
-    const phase = g.wwPhase;
+    
 
     if (phase === 'role_reveal')  { this._show('ww-panel-role-reveal', true);  this._renderWWRoleReveal(g, myId, isHost, players); }
     if (phase === 'night')        { this._show('ww-panel-night', true);         this._renderWWNight(g, myId, players); }
@@ -2287,7 +2290,7 @@ class UIController {
     if (phase === 'day_discuss')  { this._show('ww-panel-day-discuss', true);   this._renderWWDiscuss(g, players, myId, isHost, amAlive); }
     if (phase === 'vote')         { this._show('ww-panel-vote', true);          this._renderWWVote(g, players, myId, amAlive); }
     if (phase === 'vote_result')  { this._show('ww-panel-vote-result', true);   this._renderWWVoteResult(g, players); }
-    if (phase === 'special')      { this._show('ww-panel-special', true);       this._renderWWSpecial(g, players, myId); }
+    
     if (phase === 'end')          { this._show('ww-panel-end', true);           this._renderWWEnd(g, players); }
   }
 
