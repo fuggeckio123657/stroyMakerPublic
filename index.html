@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>故事接龍 — 多人即時遊戲</title>
+  <title>派對遊戲室 ─ 多人即時遊戲</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;500;700;900&family=Noto+Sans+TC:wght@300;400;500;600&display=swap" rel="stylesheet">
@@ -16,27 +16,64 @@
 <!-- ══ HOME ═══════════════════════════════════════════════ -->
 <div id="screen-home" class="screen active">
   <div class="bg-noise"></div>
-  <div class="container">
-    <div class="hero">
-      <div class="hero-glyph">故</div>
-      <h1 class="logo">故事接龍</h1>
-      <p class="subtitle">多人即時協作敘事遊戲</p>
-    </div>
-    <div class="card">
-      <div class="form-group">
-        <label for="input-name">你的暱稱</label>
-        <input type="text" id="input-name" placeholder="輸入暱稱…" maxlength="20" autocomplete="off">
+  <div class="home-particles">
+    <span class="hp">📖</span><span class="hp">🐺</span><span class="hp">🔮</span>
+    <span class="hp">🧙</span><span class="hp">👑</span><span class="hp">🌙</span>
+    <span class="hp">🏹</span><span class="hp">⚔️</span>
+  </div>
+
+  <div class="home-center">
+
+    <!-- Hero branding -->
+    <div class="home-hero-block">
+      <div class="home-crown-ring">
+        <span class="home-crown-icon">🎮</span>
       </div>
-      <div class="btn-group-vert">
-        <button id="btn-create-room" class="btn btn-primary btn-full">✦ 建立房間</button>
-        <div class="divider"><span>或加入現有房間</span></div>
-        <div class="join-row">
-          <input type="text" id="input-room-code" placeholder="輸入房間代碼" maxlength="6" autocomplete="off">
-          <button id="btn-join-room" class="btn btn-secondary">加入</button>
+      <h1 class="home-main-title">派對遊戲室</h1>
+      <p class="home-main-sub">PARTY GAME ROOM</p>
+      <div class="home-title-divider">
+        <span class="htd-line"></span>
+        <span class="htd-gem">✦</span>
+        <span class="htd-line"></span>
+      </div>
+    </div>
+
+    <!-- Game modes row -->
+    <div class="home-modes-row">
+      <div class="home-mode-pill">
+        <span class="hmp-icon">📖</span>
+        <div>
+          <div class="hmp-name">故事接龍</div>
+          <div class="hmp-desc">協作敘事 · 輪流創作</div>
+        </div>
+      </div>
+      <div class="home-mode-pill hmp-wolf">
+        <span class="hmp-icon">🐺</span>
+        <div>
+          <div class="hmp-name">狼人殺</div>
+          <div class="hmp-desc">推理對抗 · 陣營博弈</div>
         </div>
       </div>
     </div>
-    <div id="home-error" class="error-msg hidden"></div>
+
+    <!-- Form card -->
+    <div class="home-card-wrap">
+      <div class="home-card">
+        <div class="home-card-section">
+          <label class="home-field-label" for="input-name">玩家暱稱</label>
+          <input type="text" id="input-name" class="home-field" placeholder="輸入你的暱稱…" maxlength="20" autocomplete="off">
+        </div>
+        <button id="btn-create-room" class="home-btn-primary">✦ 建立新房間</button>
+        <div class="home-sep"><span>或加入現有房間</span></div>
+        <div class="home-join-row">
+          <input type="text" id="input-room-code" class="home-field home-code-field" placeholder="房間代碼" maxlength="6" autocomplete="off" style="text-transform:uppercase">
+          <button id="btn-join-room" class="home-btn-secondary">加入</button>
+        </div>
+        <div id="home-error" class="error-msg hidden" style="margin-top:12px"></div>
+      </div>
+      <p class="home-fine-print">最多 16 人 · Firebase 即時連線 · 支援觀戰模式</p>
+    </div>
+
   </div>
 </div>
 
@@ -53,57 +90,145 @@
       <button id="btn-leave-room" class="btn btn-ghost btn-sm">← 離開</button>
     </div>
     <div class="room-body">
+
+      <!-- Players panel -->
       <div class="panel players-panel">
         <div class="panel-header">
           玩家列表
-          <span id="player-count" class="badge-count">0 / 8</span>
+          <span id="player-count" class="badge-count">0 / 12</span>
         </div>
         <ul id="players-list" class="players-list"></ul>
+        <!-- Voluntary spectator toggle -->
+        <div class="spec-toggle-wrap">
+          <button id="btn-toggle-spectator" class="btn btn-ghost btn-sm btn-full spec-toggle-btn">
+            👁 進入觀戰模式
+          </button>
+        </div>
       </div>
+
+      <!-- Host settings panel -->
       <div class="panel settings-panel hidden" id="settings-panel">
         <div class="panel-header">遊戲設定 <span class="host-crown">👑 主持人</span></div>
-        <div class="form-group">
-          <label>遊戲模式</label>
-          <div class="radio-group">
-            <label class="radio-label">
-              <input type="radio" name="game-mode" value="round" checked>
-              <span class="radio-box"></span>回合制（全員鎖定後換輪）
-            </label>
-            <label class="radio-label">
-              <input type="radio" name="game-mode" value="time">
-              <span class="radio-box"></span>計時制（倒數結束自動換輪）
-            </label>
-          </div>
+
+        <!-- Host spectator exit bar (shown when host enters spectator mode) -->
+        <div id="host-spec-exit-bar" class="host-spec-exit-bar hidden">
+          <span class="spec-info">👁 你目前在觀戰模式</span>
+          <button id="btn-host-leave-spec" class="btn-host-leave-spec">🎮 退出觀戰</button>
         </div>
-        <div class="form-row">
-          <div class="form-group half">
-            <label for="input-rounds">回合數</label>
-            <input type="number" id="input-rounds" value="2" min="1" max="10">
-          </div>
-          <div class="form-group half hidden" id="time-setting">
-            <label for="input-turn-time">每輪秒數</label>
-            <input type="number" id="input-turn-time" value="90" min="15" max="300">
-          </div>
+
+        <!-- Room capacity -->
+        <div class="form-group form-inline-row">
+          <label for="select-max-players">房間人數上限</label>
+          <select id="select-max-players" class="select-compact">
+            <option value="8">8 人</option>
+            <option value="10">10 人</option>
+            <option value="12" selected>12 人</option>
+            <option value="14">14 人</option>
+            <option value="16">16 人</option>
+          </select>
         </div>
-        <p class="round-hint">一回合 = 每位玩家輪流寫完所有故事一遍</p>
-        <button id="btn-start-game" class="btn btn-primary btn-full">開始遊戲 →</button>
+
+        <!-- Game Type Switcher -->
+        <div class="game-type-switcher">
+          <button class="game-type-btn active" data-type="story">📖 故事接龍</button>
+          <button class="game-type-btn" data-type="werewolf">🐺 狼人殺</button>
+        </div>
+
+        <!-- Story Settings -->
+        <div id="story-settings">
+          <div class="form-group">
+            <label>遊戲模式</label>
+            <div class="radio-group">
+              <label class="radio-label">
+                <input type="radio" name="game-mode" value="round" checked>
+                <span class="radio-box"></span>回合制（全員鎖定後換輪）
+              </label>
+              <label class="radio-label">
+                <input type="radio" name="game-mode" value="time">
+                <span class="radio-box"></span>計時制（倒數結束自動換輪）
+              </label>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group half">
+              <label for="input-rounds">回合數</label>
+              <input type="number" id="input-rounds" value="2" min="1" max="10">
+            </div>
+            <div class="form-group half hidden" id="time-setting">
+              <label for="input-turn-time">每輪秒數</label>
+              <input type="number" id="input-turn-time" value="90" min="15" max="300">
+            </div>
+          </div>
+          <p class="round-hint">一回合 = 每位玩家輪流寫完所有故事一遍</p>
+          <button id="btn-start-game" class="btn btn-primary btn-full">開始遊戲 →</button>
+        </div>
+
+        <!-- Werewolf Settings -->
+        <div id="ww-settings" class="hidden">
+          <div class="ww-role-config">
+            <div class="role-config-title">職業設定 <span class="role-config-hint">（村民自動補齊）</span></div>
+            <div class="role-config-grid">
+              <div class="role-row wolf-role"><span class="rc-icon">🐺</span><span class="rc-name">狼人</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="wolf" data-dir="-1">−</button><span id="ww-count-wolf" class="rc-num">2</span><button class="role-counter-btn" data-role="wolf" data-dir="1">+</button></div></div>
+              <div class="role-row wolf-role"><span class="rc-icon">👑</span><span class="rc-name">狼王</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="wolfking" data-dir="-1">−</button><span id="ww-count-wolfking" class="rc-num">0</span><button class="role-counter-btn" data-role="wolfking" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">🔮</span><span class="rc-name">預言家</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="seer" data-dir="-1">−</button><span id="ww-count-seer" class="rc-num">1</span><button class="role-counter-btn" data-role="seer" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">🧙</span><span class="rc-name">女巫</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="witch" data-dir="-1">−</button><span id="ww-count-witch" class="rc-num">1</span><button class="role-counter-btn" data-role="witch" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">🏹</span><span class="rc-name">獵人</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="hunter" data-dir="-1">−</button><span id="ww-count-hunter" class="rc-num">1</span><button class="role-counter-btn" data-role="hunter" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">⚔️</span><span class="rc-name">騎士</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="knight" data-dir="-1">−</button><span id="ww-count-knight" class="rc-num">0</span><button class="role-counter-btn" data-role="knight" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">💣</span><span class="rc-name">炸彈客</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="bomber" data-dir="-1">−</button><span id="ww-count-bomber" class="rc-num">0</span><button class="role-counter-btn" data-role="bomber" data-dir="1">+</button></div></div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="ww-night-time">夜晚行動時限（秒）</label>
+            <input type="number" id="ww-night-time" value="30" min="15" max="90">
+          </div>
+          <button id="btn-start-ww" class="btn btn-primary btn-full ww-start-btn">開始狼人殺 🐺</button>
+        </div>
+
         <div id="room-error" class="error-msg hidden"></div>
       </div>
+
+      <!-- Non-host waiting panel (non-spectator) -->
       <div class="panel waiting-panel hidden" id="waiting-panel">
-        <div class="spinner large"></div>
-        <p class="waiting-text">等待主持人開始遊戲</p>
-        <p class="waiting-hint">遊戲設定由主持人決定</p>
+        <div class="panel-header">遊戲設定 <span class="host-crown">👁 唯讀</span></div>
+        <div id="settings-preview" class="settings-preview">
+          <div class="preview-row"><span class="preview-label">遊戲模式</span><span class="preview-val">等待主持人設定…</span></div>
+        </div>
+        <div class="waiting-footer">
+          <div class="spinner"></div>
+          <p class="waiting-text">等待主持人開始遊戲</p>
+        </div>
       </div>
+
+      <!-- Spectator lobby panel (shown when player enters spectator mode) -->
+      <div class="panel spectator-lobby-panel hidden" id="spectator-lobby-panel">
+        <div class="spec-lobby-header">
+          <span class="spec-lobby-badge">👁 觀戰</span>
+          <span class="spec-lobby-title">你目前在觀戰模式</span>
+        </div>
+        <div class="spec-lobby-body">
+          <p style="font-size:.82rem;color:var(--txt1);margin:0 0 8px">你不會被分配遊戲身份，可隨時退出觀戰重新加入。</p>
+          <div id="spectator-lobby-content"></div>
+        </div>
+        <div class="spec-lobby-footer">
+          <button id="btn-leave-spec" class="btn-leave-spec">🎮 退出觀戰，回到玩家列表</button>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
 
-<!-- ══ GAME ════════════════════════════════════════════════ -->
+<!-- ══ GAME (Story Relay) ═══════════════════════════════════ -->
 <div id="screen-game" class="screen hidden">
   <div class="bg-noise"></div>
   <div class="game-wrap">
-
-    <!-- Header (always visible inside game screen) -->
     <div class="game-header">
       <div class="game-meta">
         <span id="game-round-label" class="round-label">第 1 回合</span>
@@ -122,95 +247,218 @@
       </div>
     </div>
 
-    <!-- ── WRITING ── -->
-    <div id="phase-writing" class="game-phase hidden">
-      <div class="context-section">
-        <div class="section-label">📜 上一段故事</div>
-        <div id="story-context-text" class="context-box">
-          <span class="context-placeholder">（故事的開端，由你來書寫！）</span>
-        </div>
+    <div id="phase-writing" class="hidden">
+      <div class="story-context-box">
+        <div class="context-label">上一段故事</div>
+        <div id="story-context-text" class="context-text"></div>
       </div>
-      <div class="writing-section">
-        <div class="section-label">✍️ 你的接龍</div>
-        <textarea id="story-input"
-          placeholder="繼續這個故事… （Enter 鎖定，Shift+Enter 換行）"
-          rows="6" maxlength="500"></textarea>
-        <div class="writing-footer">
-          <span id="char-count" class="char-counter">0 / 500</span>
-          <div class="writing-actions">
-            <button id="btn-unlock" class="btn btn-ghost hidden">🔓 解鎖修改</button>
-            <button id="btn-lock"   class="btn btn-primary">🔒 鎖定答案</button>
-          </div>
+      <div class="story-input-box">
+        <textarea id="story-input" class="story-textarea" placeholder="繼續這個故事…" maxlength="500"></textarea>
+        <div class="input-footer">
+          <span id="char-count" class="char-count">0 / 500</span>
+          <button id="btn-lock"   class="btn btn-primary">🔒 鎖定送出</button>
+          <button id="btn-unlock" class="btn btn-ghost  hidden">🔓 解鎖修改</button>
         </div>
       </div>
       <div id="waiting-locked" class="waiting-locked hidden">
         <div class="spinner"></div>
-        <span>已鎖定，等待其他玩家完成…</span>
+        <p>已鎖定，等待其他玩家…</p>
       </div>
     </div>
 
-    <!-- ── SPECTATING (mid-game joiners during WRITING phase) ── -->
-    <div id="phase-spectating" class="game-phase hidden">
-      <div class="spec-hero">
-        <div class="spec-glyph">👀</div>
-        <h2 class="spec-title">觀戰模式</h2>
-        <p class="spec-desc">你在遊戲進行中加入，本局以旁觀者身份參與<br>遊戲結束後將自動加入下一局！</p>
+    <div id="phase-spectating" class="hidden">
+      <div class="spec-header">
+        <h3 id="spec-round" class="spec-round-text">觀戰中</h3>
+        <div id="spec-lock-status" class="spec-lock-status"></div>
       </div>
-      <div class="spec-status-card">
-        <div class="spec-status-row">
-          <span id="spec-round" class="spec-round-label">－</span>
-          <span id="spec-lock-status" class="spec-lock-badge">0 / 0 人已鎖定</span>
-        </div>
-        <div id="spec-players-grid" class="spec-players-grid"></div>
+      <div id="spec-players-grid" class="spec-players-grid"></div>
+    </div>
+
+    <div id="phase-revealing" class="hidden">
+      <div class="reveal-header">
+        <div class="reveal-progress-bar"><div id="reveal-progress-fill" class="reveal-progress-fill"></div></div>
+        <p id="reveal-subtitle" class="reveal-subtitle"></p>
       </div>
-      <div class="spec-waiting">
-        <div class="spinner"></div>
-        <span>等待本輪結束…</span>
+      <div id="reveal-stories" class="reveal-stories"></div>
+      <div class="reveal-actions">
+        <button id="btn-reveal-next" class="btn btn-primary hidden">下一段 →</button>
+        <button id="btn-reveal-done" class="btn btn-ghost   hidden">✦ 結束遊戲</button>
       </div>
     </div>
 
-    <!-- ── REVEALING ── -->
-    <div id="phase-revealing" class="game-phase hidden">
-      <div class="reveal-hero-section">
-        <div class="reveal-glyph">謎</div>
-        <h2 class="reveal-title">故事揭示時刻</h2>
-        <p id="reveal-subtitle" class="reveal-subtitle">主持人將逐段揭示眾人合力創作的故事</p>
-      </div>
-      <div class="reveal-progress-bar">
-        <div id="reveal-progress-fill" class="reveal-progress-fill" style="width:0%"></div>
-      </div>
-      <div id="reveal-stories-container" class="reveal-stories-container"></div>
-      <div class="reveal-footer">
-        <button id="btn-reveal-next"       class="btn btn-primary hidden">▶&ensp;揭示下一段</button>
-        <p      id="reveal-watching-text"  class="reveal-watching hidden">✦ 等待主持人揭示故事…</p>
-        <button id="btn-reveal-done"       class="btn btn-accent  hidden">✦ 查看完整故事</button>
+    <div id="phase-finished" class="hidden">
+      <div class="finished-scene">
+        <div class="finished-glyph">🎉</div>
+        <h2>故事完結！</h2>
+        <p class="finished-sub">感謝所有人共同創作這個故事</p>
+        <button id="btn-return-lobby" class="btn btn-ghost">← 返回大廳</button>
       </div>
     </div>
-
-    <!-- ── FINISHED ── -->
-    <div id="phase-finished" class="game-phase hidden">
-      <div class="finished-header">
-        <div class="finished-glyph">終</div>
-        <h2>完整故事大公開</h2>
-        <p class="finished-subtitle">每一則故事都是大家共同的傑作</p>
-      </div>
-      <div id="final-stories" class="final-stories"></div>
-      <div class="finished-footer">
-        <button id="btn-back-to-lobby" class="btn btn-ghost">← 返回房間大廳</button>
-      </div>
-    </div>
-
   </div>
 </div>
 
-<!-- Toast -->
-<div id="toast" class="toast hidden"></div>
+<!-- ══ WW GAME ══════════════════════════════════════════════ -->
+<div id="screen-ww-game" class="screen hidden">
+  <div class="bg-noise"></div>
+  <div class="ww-wrap">
 
-<!-- Overlay -->
-<div id="overlay" class="overlay hidden">
-  <div class="overlay-content">
-    <div class="spinner large"></div>
-    <p id="overlay-msg">連接中…</p>
+    <div class="ww-header">
+      <div class="ww-header-left">
+        <span id="ww-phase-label" class="ww-phase-label">身份確認</span>
+        <span id="ww-round-label" class="ww-round-label"></span>
+      </div>
+      <div id="ww-night-timer" class="ww-night-timer hidden">⏱ <span id="ww-timer-val">30</span>s</div>
+      <div id="ww-alive-count" class="ww-alive-badge">👥 0 存活</div>
+    </div>
+
+    <!-- Spectator overlay (replaces all panels when viewing as spectator) -->
+    <div id="ww-spectator-overlay" class="ww-spectator-overlay hidden">
+      <div id="ww-spectator-content" class="spectator-content"></div>
+    </div>
+
+    <!-- Dead player overlay (replaces all panels when player has died in-game) -->
+    <div id="ww-dead-overlay" class="ww-spectator-overlay ww-dead-overlay hidden">
+      <div id="ww-dead-content" class="spectator-content"></div>
+    </div>
+
+    <!-- Role Reveal -->
+    <div id="ww-panel-role-reveal" class="ww-panel hidden">
+      <div class="role-reveal-pre">你的身份是</div>
+      <div id="ww-role-card" class="role-card">
+        <div id="ww-role-icon"  class="role-icon">👨‍🌾</div>
+        <div id="ww-role-name"  class="role-name">村民</div>
+        <div id="ww-role-team"  class="role-team">村民陣營</div>
+        <div id="ww-role-desc"  class="role-desc-txt"></div>
+      </div>
+      <div id="ww-wolf-teammates" class="wolf-teammates hidden">
+        <p class="teammates-label">⚠ 你的狼人同伴：</p>
+        <div id="ww-teammates-list" class="teammates-list"></div>
+      </div>
+      <div class="role-reveal-footer">
+        <button id="btn-ww-start-night" class="btn btn-primary hidden">🌙 所有人已確認，開始夜晚</button>
+        <p id="ww-night-starts" class="ww-waiting-hint">仔細記住你的身份，等待主持人開始遊戲…</p>
+      </div>
+    </div>
+
+    <!-- Night -->
+    <div id="ww-panel-night" class="ww-panel hidden">
+      <div class="night-status-bar">
+        <span id="ww-night-step-label" class="night-step-label">請完成你的夜晚行動</span>
+        <span id="ww-night-progress" class="night-progress-badge"></span>
+      </div>
+      <div id="ww-night-wolf" class="night-subpanel hidden">
+        <div class="night-header"><div class="night-moon">🐺</div><h2>狼人請睜眼</h2>
+          <p class="night-hint">選擇今晚的目標——全員同意同一人時自動確認</p></div>
+        <div id="ww-wolf-vote-grid" class="player-vote-grid"></div>
+        <div class="night-footer">
+          <div id="ww-wolf-vote-status" class="vote-status-text"></div>
+          <button id="btn-wolf-confirm" class="btn btn-danger hidden">✓ 確認獵殺</button>
+        </div>
+      </div>
+      <div id="ww-night-seer" class="night-subpanel hidden">
+        <div class="night-header"><div class="night-moon">🔮</div><h2>預言家請睜眼</h2>
+          <p class="night-hint">點選一名玩家進行查驗，得知其陣營</p></div>
+        <div id="ww-seer-grid" class="player-vote-grid"></div>
+        <div id="ww-seer-history" class="seer-history"></div>
+      </div>
+      <div id="ww-night-witch" class="night-subpanel hidden">
+        <div class="night-header"><div class="night-moon">🧙</div><h2>女巫請睜眼</h2></div>
+        <div id="ww-witch-killed" class="witch-killed-card"></div>
+        <div class="witch-action-section">
+          <button id="btn-witch-save" class="btn btn-success">💊 使用解藥救人</button>
+        </div>
+        <div class="witch-action-section">
+          <div class="witch-poison-label">🧪 使用毒藥毒殺（選擇目標）：</div>
+          <div id="ww-witch-poison-grid" class="player-vote-grid small"></div>
+        </div>
+        <div class="witch-action-section">
+          <button id="btn-witch-pass" class="btn btn-ghost">不使用任何藥水，天亮</button>
+        </div>
+      </div>
+      <div id="ww-night-hunter" class="night-subpanel hidden">
+        <div class="night-header"><div class="night-moon">🏹</div><h2>獵人請睜眼</h2>
+          <p class="night-hint">選擇你的鎖定目標（可更換）。你出局時，鎖定目標一同死亡。</p></div>
+        <div id="ww-hunter-grid" class="player-vote-grid"></div>
+        <div class="night-footer">
+          <div id="ww-hunter-lock-status" class="vote-status-text">尚未鎖定目標</div>
+          <button id="btn-hunter-pass" class="btn btn-ghost">確認鎖定，天亮</button>
+        </div>
+      </div>
+      <div id="ww-night-waiting" class="night-subpanel hidden">
+        <div class="night-wait-scene">
+          <div class="stars"><span>✦</span><span>✦</span><span>✦</span><span>✦</span><span>✦</span></div>
+          <div class="night-moon-big">🌙</div>
+          <p class="night-wait-hint">請閉上眼睛，靜靜等待…</p>
+        </div>
+      </div>
+      <div class="night-panel-footer">
+        <div id="ww-night-progress" class="night-progress-text">等待夜晚行動…</div>
+      </div>
+    </div>
+
+    <!-- Day Announce -->
+    <div id="ww-panel-day-announce" class="ww-panel hidden">
+      <div class="day-dawn"><div class="dawn-icon">🌅</div><h2>天亮了</h2></div>
+      <div id="ww-announce-content" class="announce-content"></div>
+      <div class="announce-footer">
+        <button id="btn-ww-start-discuss" class="btn btn-primary hidden">💬 開始討論</button>
+        <p id="ww-waiting-discuss" class="ww-waiting-hint hidden">等待主持人開始討論…</p>
+      </div>
+    </div>
+
+    <!-- Day Discuss -->
+    <div id="ww-panel-day-discuss" class="ww-panel hidden">
+      <div class="discuss-header">
+        <h2>💬 討論時間</h2>
+        <div id="ww-ready-count" class="ready-count-badge">0 / 0</div>
+      </div>
+      <div id="ww-alive-players-list" class="discuss-player-list"></div>
+      <div class="discuss-actions">
+        <button id="btn-ww-ready" class="btn btn-primary">✋ 我準備好了</button>
+      </div>
+      <div id="ww-discuss-error" class="error-msg hidden"></div>
+    </div>
+
+    <!-- Vote -->
+    <div id="ww-panel-vote" class="ww-panel hidden">
+      <div class="vote-header">
+        <h2>🗳️ 投票放逐</h2>
+        <p class="vote-hint">選擇你認為是狼人的玩家，或棄票</p>
+        <div id="ww-vote-count" class="ready-count-badge">0 / 0</div>
+      </div>
+      <div id="ww-vote-grid" class="player-vote-grid vote-mode"></div>
+      <div id="vote-abstain-area" class="vote-abstain-area">
+        <button id="btn-vote-abstain" class="btn vote-abstain-btn">棄票（不投任何人）</button>
+      </div>
+    </div>
+
+    <!-- Vote Result -->
+    <div id="ww-panel-vote-result" class="ww-panel hidden">
+      <div id="ww-vote-result-content" class="vote-result-content"></div>
+      <div class="vote-result-footer"><div class="spinner"></div><span id="vote-result-footer-text">即將進入夜晚…</span></div>
+    </div>
+
+    <!-- Special -->
+    <div id="ww-panel-special" class="ww-panel hidden">
+      <div id="ww-special-actor" class="hidden">
+        <div id="ww-special-header" class="special-header"></div>
+        <div id="ww-special-grid" class="player-vote-grid"></div>
+      </div>
+      <div id="ww-special-waiting" class="night-wait-scene hidden">
+        <div class="night-moon-big">⏳</div>
+        <p id="ww-special-wait-label" class="night-step-label">等待玩家使用技能…</p>
+      </div>
+    </div>
+
+    <!-- End -->
+    <div id="ww-panel-end" class="ww-panel hidden">
+      <div id="ww-end-banner" class="end-banner"></div>
+      <div id="ww-role-reveal-list" class="role-reveal-list"></div>
+      <div class="ww-end-footer">
+        <button id="btn-ww-back-lobby" class="btn btn-ghost">← 返回房間大廳</button>
+      </div>
+    </div>
+
   </div>
 </div>
 
