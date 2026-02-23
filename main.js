@@ -66,7 +66,7 @@ const WW_ACTION = {
   WITCH_SAVE       : 'ww_witch_save',
   WITCH_POISON     : 'ww_witch_poison',
   WITCH_PASS       : 'ww_witch_pass',
-  HUNTER_LOCK      : 'ww_hunter_lock',
+  HUNTER_SHOOT     : 'ww_hunter_shoot',
   HUNTER_CONFIRM   : 'ww_hunter_confirm',
   WOLFKING_SHOOT   : 'ww_wolfking_shoot',
   KNIGHT_REVEAL    : 'ww_knight_reveal',  // knight reveals self before challenging
@@ -88,7 +88,7 @@ const WW_ACTION = {
 const VOTE_ABSTAIN_ID = '__abstain__';
 
 // Which roles have active night tasks (must confirm before night ends)
-const NIGHT_ACTIVE_ROLES = new Set(['wolf','wolfking','seer','witch','hunter']);
+const NIGHT_ACTIVE_ROLES = new Set(['wolf','wolfking','seer','witch']);
 
 const EVT = {
   PLAYER_JOINED     : 'player:joined',
@@ -229,6 +229,9 @@ const makeWerewolfGame = () => ({
   witchDone            : false,
   hunterLock           : null,
   hunterDone           : false,
+  hunterCanShoot       : false,           // hunter gained ability (killed by wolves or voted out)
+  hunterShootCause     : null,            // 'wolf' | 'vote' — why they can shoot
+  hunterShot           : false,           // hunter already used their shot
   nightConfirmed       : {},             // { pid: true } once each role-player confirms done
   // ── Day ─────────────────────────────────────────────────
   announcement         : { peaceful: true, died: [] },
@@ -863,8 +866,7 @@ class WerewolfEngine {
     else if (t === WW_ACTION.WITCH_SAVE)       this._witchSave(pid);
     else if (t === WW_ACTION.WITCH_POISON)     this._witchPoison(pid, a.targetId);
     else if (t === WW_ACTION.WITCH_PASS)       this._witchPass(pid);
-    else if (t === WW_ACTION.HUNTER_LOCK)      this._hunterLock(pid, a.targetId);
-    else if (t === WW_ACTION.HUNTER_CONFIRM)   this._hunterConfirm(pid);
+    else if (t === WW_ACTION.HUNTER_SHOOT)     this._hunterShoot(pid, a.targetId);
     else if (t === WW_ACTION.WOLFKING_SHOOT)   this._wolfkingShoot(pid, a.targetId);
     else if (t === WW_ACTION.KNIGHT_REVEAL)    this._knightReveal(pid);
     else if (t === WW_ACTION.KNIGHT_CHALLENGE) this._knightChallenge(pid, a.targetId);
@@ -933,6 +935,7 @@ class WerewolfEngine {
       witchPoison          : null,
       witchDone            : false,
       hunterDone           : false,
+      // Don't reset hunterCanShoot/hunterShot — they persist across nights
       nightConfirmed,
       discussReady         : {},
       votes                : {},
@@ -1069,21 +1072,28 @@ class WerewolfEngine {
 
   // ── Hunter ────────────────────────────────────────────
 
-  _hunterLock(pid, targetId) {
+  _hunterShoot(pid, targetId) {
     const g = store.get().game;
-    if (g.wwPhase !== 'night') return;
-    if (g.roles[pid] !== 'hunter' || !g.alive[pid]) return;
-    if (targetId && !g.alive[targetId]) return;
-    store.patchGame({ hunterLock: targetId || null });
+    if (g.wwPhase !== 'special') return;
+    const sp = g.specialPending;
+    if (!sp || sp.type !== 'hunter' || sp.pid !== pid) return;
+    if (!g.alive[targetId]) return;
+    const alive    = Object.assign({}, g.alive);
+    const deathLog = Object.assign({}, g.deathLog);
+    alive[targetId] = false;
+    deathLog[targetId] = '被獵人亮牌擊殺';
+    const cause = sp.cause || 'vote'; // 'wolf' = killed at night → continue to day; 'vote' = voted out → next night
+    store.patchGame({ alive, deathLog, hunterShot: true, specialPending: null });
     this.broadcast();
-  }
-
-  _hunterConfirm(pid) {
-    const g = store.get().game;
-    if (g.wwPhase !== 'night' || g.hunterDone) return;
-    if (g.roles[pid] !== 'hunter') return;
-    store.patchGame({ hunterDone: true });
-    this._confirmPlayer(pid);
+    if (!this._checkWin()) {
+      if (cause === 'wolf') {
+        // Hunter was wolf-killed during night → resume day flow after special
+        setTimeout(() => this._startDiscuss(), 2500);
+      } else {
+        // Hunter was voted out → proceed to next night
+        setTimeout(() => this._startNight(), 2500);
+      }
+    }
   }
 
   // ── Night Resolution ──────────────────────────────────
@@ -1096,46 +1106,47 @@ class WerewolfEngine {
     const died     = [];
     const deathLog = Object.assign({}, g.deathLog);
 
-    // Wolf kill (炸彈客 night-killed does NOT trigger bomb — only voted-out does)
+    // Wolf kill
     if (g.wolfTarget && !g.witchSave) {
       alive[g.wolfTarget] = false;
       died.push(g.wolfTarget);
       deathLog[g.wolfTarget] = '被狼人獵殺';
     }
-    // Witch poison (same — poisoning bomber does NOT trigger bomb)
+    // Witch poison
     if (g.witchPoison && alive[g.witchPoison]) {
       alive[g.witchPoison] = false;
       died.push(g.witchPoison);
       deathLog[g.witchPoison] = '被女巫毒殺';
     }
-    // Hunter carry-along
-    const hunterDied = died.find(pid => g.roles[pid] === 'hunter');
-    if (hunterDied && g.hunterLock && alive[g.hunterLock]) {
-      alive[g.hunterLock] = false;
-      died.push(g.hunterLock);
-      deathLog[g.hunterLock] = '隨獵人一同出局';
-    }
-    // Wolfking secret shot: apply if wolfking previously chose a target secretly
+    // Wolfking secret shot
     if (g.wolfkingSecretReady && g.wolfkingSecretTarget && alive[g.wolfkingSecretTarget]) {
       alive[g.wolfkingSecretTarget] = false;
       died.push(g.wolfkingSecretTarget);
       deathLog[g.wolfkingSecretTarget] = '被狼王秘密帶走';
     }
 
+    // Check if hunter was wolf-killed (not witch) → will trigger special after announce
+    const hunterWolfKilled = g.wolfTarget && !g.witchSave && g.roles[g.wolfTarget] === 'hunter';
+
     store.patchGame({
       wwPhase: 'day_announce', alive, deathLog,
       announcement: { peaceful: died.length === 0, died },
-      // Commit witch usage flags in case night timer resolved without _witchPass (Bug 1 fix)
-      witchAntidoteUsed: g.witchSave          ? true : g.witchAntidoteUsed,
-      witchPoisonUsed  : g.witchPoison        ? true : g.witchPoisonUsed,
-      // Clear shot target but KEEP wolfkingSecretReady=true so wolfking can't shoot again (Bug 2 fix)
+      witchAntidoteUsed: g.witchSave   ? true : g.witchAntidoteUsed,
+      witchPoisonUsed  : g.witchPoison ? true : g.witchPoisonUsed,
       wolfkingSecretTarget: null,
-      // Only preserve the "used" flag — don't reset to false
-      wolfkingSecretReady: g.wolfkingSecretReady,
+      wolfkingSecretReady : g.wolfkingSecretReady,
+      ...(hunterWolfKilled ? { hunterCanShoot: true, hunterShootCause: 'wolf' } : {}),
     });
     this.broadcast();
-    // Bug 5 fix: delay win-check so death announcement has time to render
-    setTimeout(() => { this._checkWin(); }, 4000);
+    setTimeout(() => {
+      if (this._checkWin()) return;
+      if (hunterWolfKilled) {
+        // Trigger public hunter special after win check
+        const hunterPid = g.wolfTarget;
+      store.patchGame({ wwPhase: 'special', specialPending: { type: 'hunter', pid: hunterPid, cause: 'wolf' } });
+        this.broadcast();
+      }
+    }, 4000);
   }
 
   // ── Day ───────────────────────────────────────────────
@@ -1181,15 +1192,16 @@ class WerewolfEngine {
       this.broadcast();
       if (t <= 0) {
         this.stopVoteTimer();
-        // Auto-abstain anyone who hasn't locked yet
+        // Auto-lock: use current selection if player had one, otherwise abstain
         const g = store.get().game;
         const alivePids = Object.keys(g.alive).filter(id => g.alive[id]);
         const votes     = Object.assign({}, g.votes);
         const voteLocked = Object.assign({}, g.voteLocked);
         alivePids.forEach(pid => {
           if (!voteLocked[pid]) {
-            votes[pid]     = VOTE_ABSTAIN_ID;
-            voteLocked[pid]= true;
+            // If player had a selection, lock it; otherwise abstain
+            if (!votes[pid]) votes[pid] = VOTE_ABSTAIN_ID;
+            voteLocked[pid] = true;
           }
         });
         store.patchGame({ votes, voteLocked });
@@ -1345,18 +1357,22 @@ class WerewolfEngine {
 
     alive[eliminated] = false;
     deathLog[eliminated] = '被投票放逐';
-    if (role === 'hunter' && g.hunterLock && alive[g.hunterLock]) {
-      alive[g.hunterLock] = false;
-      deathLog[g.hunterLock] = '隨獵人一同出局';
-    }
 
     store.patchGame({ alive, deathLog, wwPhase: 'vote_result', voteEliminated: eliminated, voteVoters: voters, abstainCount });
     this.broadcast();
-    // Delay win check so vote_result screen is visible before jumping to end
     setTimeout(() => {
       if (this._checkWin()) return;
-      // Wolfking voted out already has secret shot shown on their dead overlay — just continue
-      this._startNight();
+      if (role === 'hunter') {
+        // Hunter voted out → public special phase for everyone to watch
+        store.patchGame({
+          wwPhase: 'special',
+          specialPending: { type: 'hunter', pid: eliminated, cause: 'vote' },
+          hunterCanShoot: true, hunterShootCause: 'vote',
+        });
+        this.broadcast();
+      } else {
+        this._startNight();
+      }
     }, 3500);
   }
 
@@ -1723,10 +1739,11 @@ class UIController {
       this._lastTurn = game.currentTurn;
       const inp = document.getElementById('story-input');
       if (inp) { inp.value = ''; inp.disabled = false; }
-      this._setText('char-count', '0 / 500');
+      this._setText('char-count', '0');
+      this._updateCharRing(0);
       this._show('btn-lock',       true);
-      this._show('btn-unlock',     false);
       this._show('waiting-locked', false);
+      this._show('writing-card',   true);
     }
   }
 
@@ -1751,17 +1768,21 @@ class UIController {
       if (te) {
         if (mode === 'time') {
           te.classList.remove('hidden');
-          this._setText('timer-value', String(Math.max(0, timeLeft || 0)));
-          te.classList.toggle('urgent', (timeLeft || 0) <= 10);
+          const tv = Math.max(0, timeLeft || 0);
+          this._setText('timer-value', String(tv));
+          te.classList.toggle('urgent', tv <= 10);
+          // Update ring progress
+          const maxTime = game.nightTime || 90;
+          const pct = tv / maxTime;
+          const ring = document.getElementById('timer-ring-fill');
+          if (ring) ring.style.strokeDashoffset = String(94.25 * (1 - pct));
           // Auto-lock: when timer hits 0, submit whatever the player has typed
-          if ((timeLeft || 0) <= 0 && !(game.locked || {})[myId]) {
+          if (tv <= 0 && !(game.locked || {})[myId]) {
             const inp = document.getElementById('story-input');
             const txt = inp ? inp.value.trim() : '';
             if (!isHost) {
-              // Non-host: send action to Firebase so host captures it before advance()
               gameEngine.sendAction({ type: ACTION.LOCK, text: txt || '（時間到，未輸入）' });
             }
-            // Host auto-submit handled in storyRelay.advance() already
           }
         } else {
           te.classList.add('hidden');
@@ -1810,15 +1831,14 @@ class UIController {
       if (this._autoLockTurn !== game.currentTurn) {
         this._autoLockTurn = game.currentTurn;
         var txt = (inp ? inp.value.trim() : '') || '（略過）';
-        // Use setTimeout so we don't trigger during render
         setTimeout(function() { gameEngine.sendAction({ type: ACTION.LOCK, text: txt }); }, 0);
       }
     }
 
     if (inp) inp.disabled = isLocked;
-    this._show('btn-lock',       !isLocked);
-    this._show('btn-unlock',      isLocked);
-    this._show('waiting-locked',  isLocked);
+    this._show('btn-lock',        !isLocked);
+    this._show('waiting-locked',   isLocked);
+    this._show('writing-card',    !isLocked);
   }
 
   /** Spectator view: live game progress overview */
@@ -1833,8 +1853,6 @@ class UIController {
     const inGame  = Object.keys(assignments || {});
     const lockedN = inGame.filter(id => (locked || {})[id]).length;
     this._setText('spec-lock-status', lockedN + ' / ' + inGame.length + ' 人已鎖定');
-
-    const grid = document.getElementById('spec-players-grid');
     if (grid) {
       grid.innerHTML = inGame.map(pid => {
         const p      = players[pid] || {};
@@ -1869,7 +1887,7 @@ class UIController {
 
     const revealedPerStory = Utils.computeReveal(stories, step);
     const activeIdx        = isDone ? -1 : Utils.activeRevealStory(stories, step);
-    const cont             = document.getElementById('reveal-stories');
+    const cont = document.getElementById('reveal-stories');
     if (!cont) return;
 
     cont.innerHTML = stories.map((story, si) => {
@@ -2081,6 +2099,16 @@ class UIController {
       transport.pushSettings(store.get().roomCode, ns);
     });
 
+    // Push WW vote time on change
+    var vte = document.getElementById('ww-vote-time');
+    if (vte) vte.addEventListener('change', function() {
+      var s = store.get().settings;
+      var wwCfg = s.wwConfig || {};
+      var ns = Object.assign({}, s, { wwConfig: Object.assign({}, wwCfg, { voteTime: Utils.clamp(parseInt(vte.value||60),20,180) }) });
+      store.set({ settings: ns });
+      transport.pushSettings(store.get().roomCode, ns);
+    });
+
     // Max players selector
     var mpSel = document.getElementById('select-max-players');
     if (mpSel) mpSel.addEventListener('change', function() {
@@ -2118,11 +2146,23 @@ class UIController {
     });
   }
 
+  _updateCharRing(n) {
+    const ring = document.getElementById('char-ring-fill');
+    const circumference = 81.7;
+    if (ring) ring.style.strokeDashoffset = String(circumference * (1 - Math.min(n / 500, 1)));
+    const el = document.getElementById('char-count');
+    if (el) {
+      el.textContent = String(n);
+      // Color shift when getting full
+      el.style.color = n > 400 ? '#f87171' : n > 250 ? 'var(--gold2)' : 'var(--txt2)';
+    }
+  }
+
   _bindGame() {
     var self = this;
     this._on('story-input', 'input', function() {
       var inp = document.getElementById('story-input');
-      self._setText('char-count', (inp ? inp.value.length : 0) + ' / 500');
+      self._updateCharRing(inp ? inp.value.length : 0);
     });
     this._on('story-input', 'keydown', function(e) {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -2190,9 +2230,9 @@ class UIController {
       wwEngine.sendAction({ type: WW_ACTION.WITCH_PASS });
     });
 
-    // Hunter: confirm lock
+    // Hunter: passive confirm (night toy done)
     this._on('btn-hunter-pass', 'click', function() {
-      wwEngine.sendAction({ type: WW_ACTION.HUNTER_CONFIRM });
+      wwEngine.sendAction({ type: WW_ACTION.PASSIVE_CONFIRM });
     });
 
     // Knight: challenge (toggled via discussion panel rebuild on render)
@@ -2285,6 +2325,8 @@ class UIController {
     const isDead   = hasRole && !amAlive && g.wwPhase !== 'end';
     // wolfking with pending secret shot needs special UI even while dead
     const isWolfkingDeadWithPendingShot = isDead && (g.roles||{})[myId] === 'wolfking' && !g.wolfkingSecretReady;
+    // hunter who can shoot needs shot UI on dead overlay
+    const isHunterDeadWithShot = isDead && (g.roles||{})[myId] === 'hunter' && g.hunterCanShoot && !g.hunterShot;
 
     this._renderWWHeader(g, players, myId);
 
@@ -2303,11 +2345,18 @@ class UIController {
     }
 
     if (isDead && !isSpectator) {
-      this._renderWWDead(g, players, myId, isHost, isWolfkingDeadWithPendingShot);
-      // Dead host still needs host control panel rendered for host-specific actions
-      // (like start discuss after a peaceful night). Render transparent floating host bar.
-      if (isHost) this._renderWWDeadHostBar(g);
-      return;
+      // Exception: if it's the special phase and THIS dead player is the actor (hunter/wolfking),
+      // they must see the special panel to take their action — skip the dead overlay.
+      const sp = g.specialPending;
+      const isSpecialActor = g.wwPhase === 'special' && sp && sp.pid === myId;
+
+      if (!isSpecialActor) {
+        this._renderWWDead(g, players, myId, isHost, isWolfkingDeadWithPendingShot, isHunterDeadWithShot);
+        if (isHost) this._renderWWDeadHostBar(g);
+        return;
+      }
+      // Actor falls through to render the special panel below
+      this._show('ww-dead-overlay', false);
     }
 
     const phase = g.wwPhase;
@@ -2370,7 +2419,7 @@ class UIController {
   // Kept as no-op for compatibility; actual toggle logic is in _bindWWGame event delegation
   _initSpecToggle() {}
 
-  _renderWWDead(g, players, myId, isHost, isWolfkingPending) {
+  _renderWWDead(g, players, myId, isHost, isWolfkingPending, isHunterPending) {
     var cont = document.getElementById('ww-dead-content');
     if (!cont) return;
 
@@ -2408,7 +2457,7 @@ class UIController {
       '</div>';
     }).join('');
 
-    // Wolfking secret shot panel: shown only to the dead wolfking with pending shot
+    // Wolfking secret shot panel
     var wkSection = '';
     if (isWolfkingPending) {
       var alivePids = Object.keys(g.alive||{}).filter(id => g.alive[id] && id !== myId);
@@ -2436,6 +2485,9 @@ class UIController {
         '</div>';
     }
 
+    // Hunter shoot panel — REMOVED: hunter now uses public special phase visible to all
+    var hunterSection = '';
+
     cont.innerHTML =
       '<div class="dead-player-header">' +
         '<div class="dead-skull-big">💀</div>' +
@@ -2449,6 +2501,7 @@ class UIController {
         '</div>' +
       '</div>' +
       wkSection +
+      hunterSection +
       '<div class="spectator-phase-bar">' +
         '<span class="spec-phase">' + (phaseNames[phase]||phase) + '</span>' +
         (round > 0 ? '<span class="spec-round">第 ' + round + ' 夜</span>' : '') +
@@ -2547,7 +2600,7 @@ class UIController {
     const amHunter = myRole === 'hunter';
     const isActive = NIGHT_ACTIVE_ROLES.has(myRole);
     const amDone   = !!(g.nightConfirmed || {})[myId];
-    const isPassive = !isActive; // villager, bomber, knight
+    const isPassive = !isActive && !amHunter; // villager, bomber, knight (hunter has own subpanel)
 
     // Each player sees only their own panel simultaneously
     this._show('ww-night-wolf',    amWolf   && !amDone);
@@ -2555,8 +2608,70 @@ class UIController {
     this._show('ww-night-witch',   amWitch  && !amDone);
     this._show('ww-night-hunter',  amHunter && !amDone);
     this._show('ww-night-passive', isPassive && !amDone);
-    // Show waiting scene: active role done, OR passive role has confirmed
-    this._show('ww-night-waiting', (isActive && amDone) || (isPassive && amDone));
+    // Show waiting scene: active role done, OR passive/hunter confirmed
+    this._show('ww-night-waiting', (isActive && amDone) || ((isPassive || amHunter) && amDone));
+
+    // Hunter toy — rendered in ww-night-hunter's own toy div
+    if (amHunter && !amDone) {
+      const hunterToy = document.getElementById('night-toy-hunter');
+      if (hunterToy && hunterToy.getAttribute('data-init') !== '1') {
+        hunterToy.setAttribute('data-init', '1');
+        hunterToy.style.width  = '260px';
+        hunterToy.style.height = '175px';
+        hunterToy.innerHTML =
+          '<div class="toy-hunter-game" id="toy-hunter-game">' +
+            '<div class="hunter-range">' +
+              '<div class="hunter-target" id="hunter-target">🎯</div>' +
+            '</div>' +
+            '<div class="hunter-stats">' +
+              '<span class="hunter-hits" id="hunter-hits">命中：0</span>' +
+              '<span class="hunter-misses" id="hunter-misses">偏移：0</span>' +
+            '</div>' +
+            '<div class="toy-msg" id="toy-msg-hunter">等靶子移動再點擊射擊！</div>' +
+          '</div>';
+        (function() {
+          var target   = hunterToy.querySelector('#hunter-target');
+          var hitsEl   = hunterToy.querySelector('#hunter-hits');
+          var missEl   = hunterToy.querySelector('#hunter-misses');
+          var msgEl    = hunterToy.querySelector('#toy-msg-hunter');
+          var range    = hunterToy.querySelector('.hunter-range');
+          var hits = 0, misses = 0, moving = false;
+          var hitMsgs  = ['正中靶心！','好眼力！','百步穿楊！','神射手！','完美命中！'];
+          var missMsgs = ['偏了一點…','下次瞄準再射','慢慢來','手穩一點'];
+          function moveTarget() {
+            if (!range || !target) return;
+            moving = true;
+            var rw = range.offsetWidth  || 220;
+            var rh = range.offsetHeight || 100;
+            var tx = 10 + Math.random() * (rw - 50);
+            var ty = 10 + Math.random() * (rh - 50);
+            target.style.left = tx + 'px';
+            target.style.top  = ty + 'px';
+            target.style.transform = 'scale(1.2)';
+            setTimeout(function(){ target.style.transform = 'scale(1)'; }, 200);
+            setTimeout(moveTarget, 1500 + Math.random() * 1000);
+          }
+          if (range) range.addEventListener('click', function(e) {
+            if (!moving) return;
+            var rect   = range.getBoundingClientRect();
+            var tRect  = target ? target.getBoundingClientRect() : null;
+            var hit = tRect && e.clientX >= tRect.left && e.clientX <= tRect.right &&
+                              e.clientY >= tRect.top  && e.clientY <= tRect.bottom;
+            if (hit) {
+              hits++;
+              if (hitsEl) hitsEl.textContent = '命中：' + hits;
+              if (msgEl)  msgEl.textContent  = hitMsgs[hits % hitMsgs.length];
+              if (target) { target.textContent = '💥'; setTimeout(function(){ target.textContent = '🎯'; }, 300); }
+            } else {
+              misses++;
+              if (missEl) missEl.textContent = '偏移：' + misses;
+              if (msgEl)  msgEl.textContent  = missMsgs[misses % missMsgs.length];
+            }
+          });
+          setTimeout(moveTarget, 800);
+        })();
+      }
+    }
 
     // Setup passive panel icon/title + role-specific toy
     if (isPassive && !amDone) {
@@ -2675,49 +2790,64 @@ class UIController {
           })();
 
         } else {
-          // 🏘️ Villager / default: Count sheep to sleep mini-game
+          // 🌟 Villager / default: Star catch game — stars fall, tap them before they disappear
           toyWrap.style.width  = '260px';
           toyWrap.style.height = '175px';
           toyWrap.innerHTML =
-            '<div class="toy-sheep-game" id="toy-sheep-game">' +
-              '<div class="sheep-field" id="sheep-field">' +
-                '<div class="sheep-fence">— — — — —</div>' +
+            '<div class="toy-star-game" id="toy-star-game">' +
+              '<div class="star-sky" id="star-sky"></div>' +
+              '<div class="star-ground"><div class="star-ground-line">— — — — — — —</div></div>' +
+              '<div class="star-hud">' +
+                '<span class="star-caught" id="star-caught">⭐ 0</span>' +
+                '<span class="star-missed" id="star-missed">💨 0</span>' +
               '</div>' +
-              '<div class="sheep-counter" id="sheep-counter">🐑 0 頭羊</div>' +
-              '<div class="toy-msg" id="toy-msg">點擊 ＋ 讓羊跳過柵欄</div>' +
-              '<button class="sheep-jump-btn" id="sheep-jump-btn">🐑 跳！</button>' +
+              '<div class="toy-msg" id="toy-msg">點擊流星接住它！</div>' +
             '</div>';
           (function() {
-            var field      = toyWrap.querySelector('#sheep-field');
-            var counterEl  = toyWrap.querySelector('#sheep-counter');
-            var msgEl      = toyWrap.querySelector('#toy-msg');
-            var jumpBtn    = toyWrap.querySelector('#sheep-jump-btn');
-            var count = 0;
-            var drowsy  = ['還不睏','有點睏…','眼皮很重','快睡著了','Zz…','ZZZ…','zzZZzz','已入夢'];
-            var sheepFaces = ['🐑','🐏','🐑','🐑','🐑'];
+            var sky      = toyWrap.querySelector('#star-sky');
+            var caughtEl = toyWrap.querySelector('#star-caught');
+            var missedEl = toyWrap.querySelector('#star-missed');
+            var msgEl    = toyWrap.querySelector('#toy-msg');
+            var caught = 0, missed = 0;
+            var stars  = ['⭐','🌟','✨','💫','🌠'];
+            var hitMsgs  = ['接住了！','漂亮！','太快了！','光速接取！','閃耀！'];
+            var missMsgs = ['跑掉了…','下次接住','快一點！','手要快！'];
 
-            function addSheep() {
-              count++;
-              if (counterEl) counterEl.textContent = '🐑 ' + count + ' 頭羊';
-              if (msgEl) msgEl.textContent = drowsy[Math.min(count - 1, drowsy.length - 1)];
-              // spawn jumping sheep animation
-              if (field) {
-                var sheep = document.createElement('div');
-                sheep.className = 'toy-jumping-sheep';
-                sheep.textContent = sheepFaces[Math.floor(Math.random()*sheepFaces.length)];
-                sheep.style.left = (10 + Math.random()*15) + 'px';
-                field.appendChild(sheep);
-                setTimeout(function(){ if(sheep.parentNode) sheep.parentNode.removeChild(sheep); }, 900);
-              }
-              if (count >= 8 && jumpBtn) {
-                jumpBtn.textContent = '💤 夢鄉了';
-                jumpBtn.disabled = true;
-              }
+            function spawnStar() {
+              if (!sky) return;
+              var el = document.createElement('div');
+              el.className = 'falling-star';
+              el.textContent = stars[Math.floor(Math.random()*stars.length)];
+              var leftPct = 5 + Math.random() * 80;
+              var duration = 1800 + Math.random() * 800;
+              el.style.cssText = 'left:' + leftPct + '%;animation-duration:' + duration + 'ms';
+
+              var alive = true;
+              el.addEventListener('click', function(e) {
+                if (!alive) return;
+                e.stopPropagation();
+                alive = false;
+                caught++;
+                el.style.animation = 'starPop .3s ease forwards';
+                if (caughtEl) caughtEl.textContent = '⭐ ' + caught;
+                if (msgEl) msgEl.textContent = hitMsgs[caught % hitMsgs.length];
+                setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); }, 300);
+              });
+
+              sky.appendChild(el);
+              setTimeout(function() {
+                if (!alive) return;
+                alive = false;
+                missed++;
+                if (missedEl) missedEl.textContent = '💨 ' + missed;
+                if (msgEl) msgEl.textContent = missMsgs[missed % missMsgs.length];
+                if (el.parentNode) el.parentNode.removeChild(el);
+              }, duration + 100);
+
+              // Schedule next star
+              setTimeout(spawnStar, 1000 + Math.random() * 600);
             }
-
-            if (jumpBtn) jumpBtn.addEventListener('click', function() {
-              if (count < 8) addSheep();
-            });
+            setTimeout(spawnStar, 600);
           })();
         }
       }
@@ -2834,28 +2964,6 @@ class UIController {
             }).join('');
       }
     }
-
-    // ── Hunter panel ──────────────────────────────────────
-    if (amHunter && !amDone) {
-      var hunterGrid = document.getElementById('ww-hunter-grid');
-      if (hunterGrid) {
-        var hpids = Object.keys(g.alive||{}).filter(function(id) { return g.alive[id] && id !== myId; });
-        hunterGrid.innerHTML = hpids.map(function(pid) {
-          var p = players[pid] || {};
-          var isLk = g.hunterLock === pid;
-          return '<div class="vote-chip ' + (isLk?'selected':'') + '" onclick="wwEngine.sendAction({type:WW_ACTION.HUNTER_LOCK,targetId:\'' + pid + '\'})">' +
-            '<div class="vote-avatar" style="background:' + Utils.avatarColor(p.name||pid) + '">' + (p.name||'?')[0] + '</div>' +
-            '<span>' + Utils.escapeHtml(p.name||pid) + '</span>' +
-            (isLk ? '<span class="vote-tally">🔒</span>' : '') + '</div>';
-        }).join('');
-      }
-      var lkStatus = document.getElementById('ww-hunter-lock-status');
-      if (lkStatus) {
-        lkStatus.textContent = g.hunterLock
-          ? '目前鎖定：' + ((players[g.hunterLock]||{}).name || g.hunterLock)
-          : '尚未鎖定目標（可不鎖定）';
-      }
-    }
   }
 
   _renderWWAnnounce(g, players, isHost) {
@@ -2909,7 +3017,6 @@ class UIController {
     var iReady   = !!(g.discussReady||{})[myId];
     var myRole   = (g.roles||{})[myId];
     var isKnight = myRole === 'knight' && !g.knightUsed && amAlive;
-    var isHunter = myRole === 'hunter' && amAlive;
     var knightRevealed = !!g.knightRevealed;
 
     // Find knight pid for public announcements
@@ -2933,7 +3040,7 @@ class UIController {
           '<span class="knight-banner-text">' +
             '<strong>' + Utils.escapeHtml(kName) + '</strong> 向 ' +
             '<strong>' + Utils.escapeHtml(tName) + '</strong> 發起決鬥 — ' +
-            (hit ? '命中！' + (clog.targetRole === 'wolfking' ? '🐺👑 狼王倒下！' : '🐺 狼人倒下！') : '😤 決鬥失敗，騎士出局') +
+            (hit ? '命中！決鬥成功！' : '😤 決鬥失敗，騎士出局') +
           '</span>';
         bannerEl.classList.remove('hidden');
       } else if (knightRevealed && knightPid) {
@@ -2961,17 +3068,13 @@ class UIController {
         // Knight challenge button — only to knight themselves after reveal
         var knightBtn = (isKnight && !isMe && knightRevealed) ?
           '<button class="btn btn-xs btn-danger knight-btn" onclick="wwEngine.sendAction({type:WW_ACTION.KNIGHT_CHALLENGE,targetId:\'' + pid + '\'})">⚔ 決鬥</button>' : '';
-        // Hunter daytime re-lock button
-        var hunterBtn = (isHunter && !isMe) ?
-          '<button class="btn btn-xs btn-ghost hunter-day-btn ' + (g.hunterLock===pid?'selected-btn':'') + '" onclick="wwEngine.sendAction({type:WW_ACTION.HUNTER_LOCK,targetId:\'' + pid + '\'})">' +
-          (g.hunterLock===pid ? '🔒 鎖定中' : '🏹') + '</button>' : '';
         return '<div class="discuss-player-row ' + (isMe?'is-me':'') + '">' +
           '<div class="dp-avatar" style="background:' + Utils.avatarColor(p.name||pid) + '">' + (p.name||'?')[0] + '</div>' +
           '<span class="dp-name">' + Utils.escapeHtml(p.name||pid) + seerHint + (isMe?' (你)':'') +
           (isTheKnight ? ' <span class="dp-knight-badge">⚔️ 騎士</span>' : '') +
           '</span>' +
           '<span class="dp-ready">' + (isReady ? '✓ 準備好了' : '⋯') + '</span>' +
-          knightBtn + hunterBtn +
+          knightBtn +
           '</div>';
       }).join('');
     }
@@ -3115,32 +3218,77 @@ class UIController {
     var sp = g.specialPending;
     if (!sp) return;
     var isActor  = sp.pid === myId;
-    var p        = players[sp.pid] || {};
-    var roleDef  = ROLES[sp.type] || {};
-    var label    = '狼王落馬，帶走一人';   // only wolfking triggers special now
+    var actorP   = players[sp.pid] || {};
+    var isHunter = sp.type === 'hunter';
+    var isWolfking = sp.type === 'wolfking';
 
-    this._show('ww-special-actor',   isActor);
-    this._show('ww-special-waiting', !isActor);
+    // Config per role
+    var cfg = isHunter ? {
+      bgClass   : 'special-hunter-bg',
+      icon      : '🏹',
+      actorBadge: '獵人亮牌！',
+      headline  : isActor ? '你是獵人 — 選擇帶走一名玩家！' : (Utils.escapeHtml(actorP.name||sp.pid) + ' 亮出身份牌！'),
+      subline   : isActor
+        ? (g.hunterShootCause === 'wolf' ? '你被狼人擊倒，但你有最後一槍！' : '你被放逐，但你有最後一槍！')
+        : '獵人正在瞄準目標…',
+      action    : WW_ACTION.HUNTER_SHOOT,
+      waitLabel : '等待獵人選擇目標…',
+      waitIcon  : '🏹',
+    } : {
+      bgClass   : 'special-wolfking-bg',
+      icon      : '👑',
+      actorBadge: '狼王落馬！',
+      headline  : isActor ? '你是狼王 — 臨死帶走一名玩家！' : (Utils.escapeHtml(actorP.name||sp.pid) + ' 身份揭露！'),
+      subline   : isActor ? '選擇你的最後一擊目標' : '狼王正在選擇目標…',
+      action    : WW_ACTION.WOLFKING_SHOOT,
+      waitLabel : '等待狼王選擇目標…',
+      waitIcon  : '👑',
+    };
 
-    if (isActor) {
-      var hdr = document.getElementById('ww-special-header');
-      if (hdr) hdr.innerHTML = '<div class="special-icon">' + (roleDef.icon||'') + '</div>' +
-        '<h3 class="special-title">' + label + '</h3>' +
-        '<p class="special-hint">選擇一名存活玩家帶走</p>';
+    var panel = document.getElementById('ww-panel-special');
+    if (!panel) return;
 
-      var alivePids = Object.keys(g.alive||{}).filter(id => g.alive[id] && id !== myId);
-      var grid      = document.getElementById('ww-special-grid');
-      if (grid) {
-        grid.innerHTML = alivePids.map(function(pid) {
-          var pp = players[pid] || {};
-          return '<div class="vote-chip" onclick="wwEngine.sendAction({type:WW_ACTION.WOLFKING_SHOOT,targetId:\'' + pid + '\'})">' +
-            '<div class="vote-avatar" style="background:' + Utils.avatarColor(pp.name||pid) + '">' + (pp.name||'?')[0] + '</div>' +
-            '<span>' + Utils.escapeHtml(pp.name||pid) + '</span></div>';
-        }).join('');
-      }
-    } else {
-      this._setText('ww-special-wait-label', '等待 ' + Utils.escapeHtml(p.name||sp.pid) + ' 使用狼王技能…');
-    }
+    // Rebuild the special panel fully every render cycle
+    var alivePids = Object.keys(g.alive||{}).filter(id => g.alive[id] && id !== sp.pid);
+
+    var actorColor = Utils.avatarColor(actorP.name||sp.pid);
+    var actorInitial = (actorP.name||'?')[0];
+
+    var gridHtml = alivePids.map(function(pid) {
+      var pp = players[pid] || {};
+      var clr = Utils.avatarColor(pp.name||pid);
+      return '<div class="special-target-chip" onclick="wwEngine.sendAction({type:\'' + cfg.action + '\',targetId:\'' + pid + '\'})">' +
+        '<div class="special-target-avatar" style="background:' + clr + '">' + (pp.name||'?')[0] + '</div>' +
+        '<span class="special-target-name">' + Utils.escapeHtml(pp.name||pid) + '</span>' +
+        '<span class="special-target-arrow">→</span>' +
+      '</div>';
+    }).join('');
+
+    panel.innerHTML =
+      '<div class="special-stage ' + cfg.bgClass + '">' +
+        // Dramatic actor reveal
+        '<div class="special-reveal-row">' +
+          '<div class="special-actor-avatar" style="background:' + actorColor + '">' + actorInitial + '</div>' +
+          '<div class="special-reveal-info">' +
+            '<div class="special-badge">' + cfg.actorBadge + '</div>' +
+            '<div class="special-actor-name">' + Utils.escapeHtml(actorP.name||sp.pid) + '</div>' +
+          '</div>' +
+          '<div class="special-role-icon">' + cfg.icon + '</div>' +
+        '</div>' +
+
+        '<h2 class="special-headline">' + cfg.headline + '</h2>' +
+        '<p class="special-subline">' + cfg.subline + '</p>' +
+
+        (isActor
+          ? '<div class="special-target-grid">' + gridHtml + '</div>' +
+            '<p class="special-must-choose">必須選擇一人，此操作無法撤銷</p>'
+          : '<div class="special-watching">' +
+              '<div class="special-watch-icon">' + cfg.waitIcon + '</div>' +
+              '<p class="special-watch-label">' + cfg.waitLabel + '</p>' +
+              '<div class="special-dots"><span></span><span></span><span></span></div>' +
+            '</div>'
+        ) +
+      '</div>';
   }
 
   _renderWWEnd(g, players) {

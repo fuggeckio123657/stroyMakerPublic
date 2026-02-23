@@ -233,72 +233,125 @@
 <div id="screen-game" class="screen hidden">
   <div class="bg-noise"></div>
   <div class="game-wrap">
-    <div class="game-header">
+
+    <!-- Floating capsule header -->
+    <header class="game-header">
       <div class="game-meta">
-        <span id="game-round-label" class="round-label">第 1 回合</span>
+        <span id="game-round-label" class="round-label">第 1 / 1 回合</span>
         <span id="game-turn-label"  class="turn-label">第 1 / 1 輪</span>
         <span id="game-phase-badge" class="phase-badge writing">寫作中</span>
       </div>
-      <div id="game-timer" class="game-timer hidden">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"/>
-          <polyline points="12 6 12 12 16 14"/>
-        </svg>
-        <span id="timer-value">90</span>
-      </div>
-      <div id="header-lock-info" class="lock-info">
-        <span id="lock-count">已鎖定 0 / 0</span>
-      </div>
-    </div>
-
-    <div id="phase-writing" class="hidden">
-      <div class="story-context-box">
-        <div class="context-label">上一段故事</div>
-        <div id="story-context-text" class="context-text"></div>
-      </div>
-      <div class="story-input-box">
-        <textarea id="story-input" class="story-textarea" placeholder="繼續這個故事…" maxlength="500"></textarea>
-        <div class="input-footer">
-          <span id="char-count" class="char-count">0 / 500</span>
-          <button id="btn-lock"   class="btn btn-primary">🔒 鎖定送出</button>
-          <button id="btn-unlock" class="btn btn-ghost  hidden">🔓 解鎖修改</button>
+      <div class="game-header-right">
+        <div id="header-lock-info" class="lock-info hidden">
+          <span id="lock-count" class="lock-count-text">已鎖定 0 / 0</span>
+        </div>
+        <div id="game-timer" class="game-timer hidden">
+          <div class="timer-ring-wrap">
+            <svg class="timer-ring" viewBox="0 0 36 36">
+              <circle class="timer-ring-bg" cx="18" cy="18" r="15"/>
+              <circle class="timer-ring-fill" id="timer-ring-fill" cx="18" cy="18" r="15"
+                stroke-dasharray="94.25" stroke-dashoffset="0"/>
+            </svg>
+            <span id="timer-value" class="timer-value">90</span>
+          </div>
         </div>
       </div>
-      <div id="waiting-locked" class="waiting-locked hidden">
-        <div class="spinner"></div>
-        <p>已鎖定，等待其他玩家…</p>
+    </header>
+
+    <!-- ── Writing phase ─────────────────────────────────── -->
+    <div id="phase-writing" class="hidden game-phase-writing">
+      <!-- Previous segment context -->
+      <div class="manuscript-context" id="context-wrap">
+        <div class="manuscript-context-label">
+          <span class="ctx-quill">✦</span> 上一段故事
+        </div>
+        <div id="story-context-text" class="manuscript-text"></div>
+      </div>
+
+      <!-- Writing card -->
+      <div class="writing-card" id="writing-card">
+        <div class="writing-card-top">
+          <span class="writing-card-label">✍ 你的段落</span>
+          <div class="char-ring-wrap">
+            <svg class="char-ring" viewBox="0 0 32 32">
+              <circle class="char-ring-bg"   cx="16" cy="16" r="13"/>
+              <circle class="char-ring-fill" id="char-ring-fill" cx="16" cy="16" r="13"
+                stroke-dasharray="81.7" stroke-dashoffset="81.7"/>
+            </svg>
+            <span id="char-count" class="char-count-val">0</span>
+          </div>
+        </div>
+        <textarea id="story-input" class="story-textarea"
+          placeholder="繼續這個故事…" maxlength="500" rows="5"></textarea>
+        <div class="writing-actions">
+          <button id="btn-lock" class="btn btn-primary btn-lock-story">🔒 鎖定送出</button>
+        </div>
+      </div>
+
+      <!-- Locked waiting state — unlock button lives here -->
+      <div id="waiting-locked" class="waiting-locked-panel hidden">
+        <div class="waiting-locked-inner">
+          <div class="wl-lock-icon">🔐</div>
+          <div class="wl-text">
+            <div class="wl-title">已鎖定送出</div>
+            <div class="wl-sub">靜候其他人寫完…</div>
+          </div>
+          <div class="wl-dots"><span></span><span></span><span></span></div>
+        </div>
+        <button id="btn-unlock" class="btn btn-ghost btn-unlock-locked">🔓 解鎖修改</button>
       </div>
     </div>
 
+    <!-- ── Spectating phase ──────────────────────────────── -->
     <div id="phase-spectating" class="hidden">
-      <div class="spec-header">
-        <h3 id="spec-round" class="spec-round-text">觀戰中</h3>
-        <div id="spec-lock-status" class="spec-lock-status"></div>
+      <div class="spec-banner">
+        <div class="spec-banner-left">
+          <div class="spec-banner-glyph">👁</div>
+          <div>
+            <div id="spec-round" class="spec-round-label">觀戰中</div>
+            <div id="spec-lock-status" class="spec-lock-badge">0 / 0 人已鎖定</div>
+          </div>
+        </div>
       </div>
       <div id="spec-players-grid" class="spec-players-grid"></div>
     </div>
 
+    <!-- ── Revealing phase ───────────────────────────────── -->
     <div id="phase-revealing" class="hidden">
-      <div class="reveal-header">
-        <div class="reveal-progress-bar"><div id="reveal-progress-fill" class="reveal-progress-fill"></div></div>
-        <p id="reveal-subtitle" class="reveal-subtitle"></p>
+      <div class="reveal-header-bar">
+        <div class="reveal-header-title">
+          <span class="reveal-quill">📖</span>
+          <span>故事揭曉時刻</span>
+        </div>
+        <div class="reveal-progress-pill">
+          <div class="reveal-progress-bar"><div id="reveal-progress-fill" class="reveal-progress-fill"></div></div>
+          <span id="reveal-subtitle" class="reveal-subtitle-text">準備揭示…</span>
+        </div>
       </div>
-      <div id="reveal-stories" class="reveal-stories"></div>
-      <div class="reveal-actions">
-        <button id="btn-reveal-next" class="btn btn-primary hidden">下一段 →</button>
-        <button id="btn-reveal-done" class="btn btn-ghost   hidden">✦ 結束遊戲</button>
+
+      <div id="reveal-stories" class="reveal-stories-list"></div>
+
+      <div class="reveal-action-bar">
+        <button id="btn-reveal-next" class="btn btn-primary hidden">下一段 ›</button>
+        <p id="reveal-watching-text" class="reveal-watch-hint hidden">等待主持人揭示下一段…</p>
+        <button id="btn-reveal-done" class="btn btn-gold hidden">✦ 完整展示</button>
       </div>
     </div>
 
+    <!-- ── Finished phase ────────────────────────────────── -->
     <div id="phase-finished" class="hidden">
-      <div class="finished-scene">
-        <div class="finished-glyph">🎉</div>
-        <h2>故事完結！</h2>
-        <p class="finished-sub">感謝所有人共同創作這個故事</p>
+      <div class="finished-hero">
+        <div class="finished-confetti">🎉</div>
+        <h2 class="finished-title">故事完結！</h2>
+        <p class="finished-sub">感謝所有人共同創作的精彩故事</p>
+      </div>
+      <div id="final-stories" class="final-stories-list"></div>
+      <div class="finished-actions">
         <button id="btn-return-lobby" class="btn btn-ghost">← 返回大廳</button>
       </div>
     </div>
-  </div>
+
+  </div><!-- /game-wrap -->
 </div>
 
 <!-- ══ WW GAME ══════════════════════════════════════════════ -->
@@ -381,12 +434,14 @@
         </div>
       </div>
       <div id="ww-night-hunter" class="night-subpanel hidden">
-        <div class="night-header"><div class="night-moon">🏹</div><h2>獵人請睜眼</h2>
-          <p class="night-hint">選擇你的鎖定目標（可更換）。你出局時，鎖定目標一同死亡。</p></div>
-        <div id="ww-hunter-grid" class="player-vote-grid"></div>
+        <div class="night-header"><div class="night-moon">🏹</div><h2>獵人，請閉上眼睛</h2>
+          <p class="night-hint">你的技能在死後才能發動，今晚請靜靜休息</p></div>
+        <div class="night-toy-wrap">
+          <div class="night-toy" id="night-toy-hunter" data-toy-role="hunter" title="點我互動">
+          </div>
+        </div>
         <div class="night-footer">
-          <div id="ww-hunter-lock-status" class="vote-status-text">尚未鎖定目標</div>
-          <button id="btn-hunter-pass" class="btn btn-ghost">確認鎖定，天亮</button>
+          <button id="btn-hunter-pass" class="btn btn-ghost">✓ 我已閉眼，確認等待</button>
         </div>
       </div>
       <div id="ww-night-waiting" class="night-subpanel hidden">
@@ -479,17 +534,8 @@
       <div class="vote-result-footer"><div class="spinner"></div><span id="vote-result-footer-text">即將進入夜晚…</span></div>
     </div>
 
-    <!-- Special -->
-    <div id="ww-panel-special" class="ww-panel hidden">
-      <div id="ww-special-actor" class="hidden">
-        <div id="ww-special-header" class="special-header"></div>
-        <div id="ww-special-grid" class="player-vote-grid"></div>
-      </div>
-      <div id="ww-special-waiting" class="night-wait-scene hidden">
-        <div class="night-moon-big">⏳</div>
-        <p id="ww-special-wait-label" class="night-step-label">等待玩家使用技能…</p>
-      </div>
-    </div>
+    <!-- Special — hunter/wolfking public ability panel, fully rebuilt by JS -->
+    <div id="ww-panel-special" class="ww-panel hidden"></div>
 
     <!-- End -->
     <div id="ww-panel-end" class="ww-panel hidden">
