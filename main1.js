@@ -57,7 +57,6 @@ const ROLES = {
   hunter  : { id:'hunter',  name:'獵人',   team:'village', icon:'🏹', desc:'每晚鎖定一名目標（可更換）。獵人出局時，被鎖定的目標也一同死亡。' },
   knight  : { id:'knight',  name:'騎士',   team:'village', icon:'⚔️', desc:'白天可向任意玩家發起決鬥——若對方是狼人則對方死；若是好人則自己死。每局限一次。' },
   bomber  : { id:'bomber',  name:'炸彈客', team:'bomber',  icon:'💣', desc:'第三方！目標：在白天被全員票出局，可單獨獲勝。被票出局時，所有投你的人一起陣亡。' },
-  cupid   : { id:'cupid',   name:'邱比特', team:'village', icon:'💘', desc:'第一個夜晚指定兩名玩家為情侶（可包含自己）。若其中一位情侶死亡，另一位立刻殉情。若情侶分屬不同陣營，邱比特與兩位情侶成為第三方，勝利條件變為讓其餘所有玩家出局。' },
 };
 
 const WW_ACTION = {
@@ -73,9 +72,7 @@ const WW_ACTION = {
   KNIGHT_REVEAL    : 'ww_knight_reveal',  // knight reveals self before challenging
   KNIGHT_CHALLENGE : 'ww_knight_challenge',
   WOLFKING_SECRET  : 'ww_wolfking_secret',// wolfking picks secret target after death
-  CUPID_SELECT     : 'ww_cupid_select',   // cupid toggles a lover candidate
-  CUPID_CONFIRM    : 'ww_cupid_confirm',  // cupid locks in the pair
-  LOVER_ACK        : 'ww_lover_ack',      // lover dismisses the notification
+  NIGHT_DONE       : 'ww_night_done',
   VOTE             : 'ww_vote',           // select/change candidate (unlocked)
   VOTE_LOCK        : 'ww_vote_lock',      // lock your current selection
   VOTE_UNLOCK      : 'ww_vote_unlock',    // unlock to re-select
@@ -91,7 +88,7 @@ const WW_ACTION = {
 const VOTE_ABSTAIN_ID = '__abstain__';
 
 // Which roles have active night tasks (must confirm before night ends)
-const NIGHT_ACTIVE_ROLES = new Set(['wolf','wolfking','seer','witch','cupid']);
+const NIGHT_ACTIVE_ROLES = new Set(['wolf','wolfking','seer','witch']);
 
 const EVT = {
   PLAYER_JOINED     : 'player:joined',
@@ -254,13 +251,6 @@ const makeWerewolfGame = () => ({
   winner               : null,
   winReason            : '',
   deathLog             : {},  // { pid: causeString }
-  // ── Cupid / Lovers ──────────────────────────────────────
-  cupidDone            : false,           // cupid has fired arrow (only round 1)
-  cupidSelected        : [],              // cupid's pending selections (up to 2)
-  lovers               : null,           // [pid1, pid2] once set
-  loverTeam            : null,           // 'village'|'wolf'|'third'
-  cupidId              : null,           // who plays cupid
-  loverAcks            : {},             // { pid: true } — lover dismissed notification
 });
 
 class Store {
@@ -289,7 +279,7 @@ const store = new Store({
     rounds     : CONFIG.DEFAULT_ROUNDS,
     turnTime   : CONFIG.DEFAULT_TURN_TIME,
     maxPlayers : 12,
-    wwConfig   : { roles: { wolf:2, wolfking:0, seer:1, witch:1, hunter:1, knight:0, bomber:0, cupid:0 }, nightTime: 30, voteTime: 60 },
+    wwConfig   : { roles: { wolf:2, wolfking:0, seer:1, witch:1, hunter:1, knight:0, bomber:0 }, nightTime: 30, voteTime: 60 },
   },
   game       : makeGame(),
 });
@@ -881,9 +871,7 @@ class WerewolfEngine {
     else if (t === WW_ACTION.KNIGHT_REVEAL)    this._knightReveal(pid);
     else if (t === WW_ACTION.KNIGHT_CHALLENGE) this._knightChallenge(pid, a.targetId);
     else if (t === WW_ACTION.WOLFKING_SECRET)  this._wolfkingSecret(pid, a.targetId);
-    else if (t === WW_ACTION.CUPID_SELECT)     this._cupidSelect(pid, a.targetId);
-    else if (t === WW_ACTION.CUPID_CONFIRM)    this._cupidConfirm(pid);
-    else if (t === WW_ACTION.LOVER_ACK)        this._loverAck(pid);
+    else if (t === WW_ACTION.NIGHT_DONE)       this._nightDoneAck(pid);
     else if (t === WW_ACTION.VOTE)             this._voteSelect(pid, a.targetId);
     else if (t === WW_ACTION.VOTE_LOCK)        this._voteLock(pid);
     else if (t === WW_ACTION.VOTE_UNLOCK)      this._voteUnlock(pid);
@@ -912,7 +900,6 @@ class WerewolfEngine {
     const shuffledPids  = Utils.shuffle([...pids]);
     const roles = {}, alive = {};
     shuffledPids.forEach((pid, i) => { roles[pid] = shuffledRoles[i]; alive[pid] = true; });
-    const cupidId = Object.keys(roles).find(id => roles[id] === 'cupid') || null;
 
     store.replaceGame(Object.assign(makeWerewolfGame(), {
       nightTime     : cfg.nightTime || 30,
@@ -920,7 +907,7 @@ class WerewolfEngine {
       voteTime      : cfg.voteTime  || 60,
       voteTimeLeft  : cfg.voteTime  || 60,
       roleConfig    : cfg.roles,
-      roles, alive, cupidId,
+      roles, alive,
     }));
     this.broadcast();
   }
@@ -949,8 +936,7 @@ class WerewolfEngine {
       witchDone            : false,
       hunterDone           : false,
       // Don't reset hunterCanShoot/hunterShot — they persist across nights
-      // Pre-confirm cupid on rounds > 1 (their action only applies round 1)
-      nightConfirmed       : g.cupidDone ? { [g.cupidId]: true } : {},
+      nightConfirmed,
       discussReady         : {},
       votes                : {},
       voteLocked           : {},
@@ -1096,8 +1082,7 @@ class WerewolfEngine {
     const deathLog = Object.assign({}, g.deathLog);
     alive[targetId] = false;
     deathLog[targetId] = '被獵人亮牌擊殺';
-    const cause = sp.cause || 'vote';
-    this._propagateLoverDeath(alive, deathLog, store.get().game);
+    const cause = sp.cause || 'vote'; // 'wolf' = killed at night → continue to day; 'vote' = voted out → next night
     store.patchGame({ alive, deathLog, hunterShot: true, specialPending: null });
     this.broadcast();
     if (!this._checkWin()) {
@@ -1108,72 +1093,6 @@ class WerewolfEngine {
         // Hunter was voted out → proceed to next night
         setTimeout(() => this._startNight(), 2500);
       }
-    }
-  }
-
-  // ── Cupid ─────────────────────────────────────────────
-
-  _cupidSelect(pid, targetId) {
-    const g = store.get().game;
-    if (g.wwPhase !== 'night') return;
-    if (g.roles[pid] !== 'cupid' || g.cupidDone) return;
-    let sel = (g.cupidSelected || []).slice();
-    if (sel.includes(targetId)) {
-      sel = sel.filter(id => id !== targetId); // deselect
-    } else {
-      if (sel.length < 2) sel.push(targetId);
-    }
-    store.patchGame({ cupidSelected: sel });
-    this.broadcast();
-  }
-
-  _cupidConfirm(pid) {
-    const g = store.get().game;
-    if (g.wwPhase !== 'night') return;
-    if (g.roles[pid] !== 'cupid' || g.cupidDone) return;
-    const sel = g.cupidSelected || [];
-    if (sel.length !== 2) return;
-    const [p1, p2] = sel;
-    // Determine loverTeam
-    const isWolf = r => r === 'wolf' || r === 'wolfking';
-    const p1Wolf = isWolf(g.roles[p1]);
-    const p2Wolf = isWolf(g.roles[p2]);
-    let loverTeam = 'village';
-    if (p1Wolf && p2Wolf) loverTeam = 'wolf';
-    else if (!p1Wolf && !p2Wolf) loverTeam = 'village';
-    else loverTeam = 'third'; // mixed → third party
-    store.patchGame({
-      cupidDone: true, cupidId: pid, lovers: [p1, p2],
-      loverTeam, loverAcks: {},
-    });
-    this.broadcast();
-    this._confirmPlayer(pid);
-  }
-
-  _loverAck(pid) {
-    const g = store.get().game;
-    const lovers = g.lovers || [];
-    if (!lovers.includes(pid)) return;
-    const acks = Object.assign({}, g.loverAcks, { [pid]: true });
-    store.patchGame({ loverAcks: acks });
-    this.broadcast();
-  }
-
-  // Propagate lover death: if one lover died, immediately kill the other (no skills)
-  // Returns updated { alive, deathLog } and also patches store if changes occurred
-  _propagateLoverDeath(alive, deathLog, g) {
-    const lovers = g.lovers;
-    if (!lovers || lovers.length !== 2) return;
-    const [l1, l2] = lovers;
-    // Check if newly dead
-    const l1Dead = !alive[l1];
-    const l2Dead = !alive[l2];
-    if (l1Dead && alive[l2]) {
-      alive[l2] = false;
-      deathLog[l2] = '殉情（情侶離去）';
-    } else if (l2Dead && alive[l1]) {
-      alive[l1] = false;
-      deathLog[l1] = '殉情（情侶離去）';
     }
   }
 
@@ -1209,15 +1128,9 @@ class WerewolfEngine {
     // Check if hunter was wolf-killed (not witch) → will trigger special after announce
     const hunterWolfKilled = g.wolfTarget && !g.witchSave && g.roles[g.wolfTarget] === 'hunter';
 
-    // Lover propagation: if a lover died tonight, kill the other (殉情)
-    // But if the killed-by-love player is a hunter, block their shoot ability
-    this._propagateLoverDeath(alive, deathLog, g);
-    // Rebuild died list from final alive state
-    const finalDied = Object.keys(g.alive).filter(id => g.alive[id] && !alive[id]);
-
     store.patchGame({
       wwPhase: 'day_announce', alive, deathLog,
-      announcement: { peaceful: finalDied.length === 0, died: finalDied },
+      announcement: { peaceful: died.length === 0, died },
       witchAntidoteUsed: g.witchSave   ? true : g.witchAntidoteUsed,
       witchPoisonUsed  : g.witchPoison ? true : g.witchPoisonUsed,
       wolfkingSecretTarget: null,
@@ -1324,10 +1237,10 @@ class WerewolfEngine {
       alive[targetId] = false;
       deathLog[targetId] = '被騎士決鬥擊殺';
       if (targetRole === 'wolfking') {
-        this._propagateLoverDeath(alive, deathLog, g);
+        // Wolfking killed by knight in fair combat → NO secret shot
         store.patchGame({
           alive, knightUsed: true, deathLog, knightChallengeLog: challengeLog,
-          wolfkingSecretReady: true,
+          wolfkingSecretReady: true,    // block: mark as already used (no shot)
           wolfkingSecretTarget: null,
         });
         this.broadcast();
@@ -1338,7 +1251,6 @@ class WerewolfEngine {
       alive[pid] = false;
       deathLog[pid] = '騎士決鬥失敗出局';
     }
-    this._propagateLoverDeath(alive, deathLog, g);
     store.patchGame({ alive, knightUsed: true, deathLog, knightChallengeLog: challengeLog });
     this.broadcast();
     this._checkWin();
@@ -1426,25 +1338,25 @@ class WerewolfEngine {
 
     if (role === 'bomber') {
       if (allVotedBomber) {
+        // Bomber solo win — record it as the final state
         alive[eliminated] = false;
         deathLog[eliminated] = '全票放逐，炸彈客獨勝！';
         store.patchGame({ alive, deathLog, wwPhase: 'end', winner: 'bomber', winReason: '全員票選炸彈客，炸彈客單獨獲勝！💣', voteEliminated: eliminated, voteVoters: voters, abstainCount });
         this.broadcast(); return;
       }
+      // Partial bomb — bomber eliminated + all voters die
       alive[eliminated] = false;
       deathLog[eliminated] = '被投票放逐（炸彈客引爆）';
       voters.forEach(vid => { alive[vid] = false; deathLog[vid] = '炸彈客引爆連帶陣亡'; });
-      this._propagateLoverDeath(alive, deathLog, store.get().game);
       store.patchGame({ alive, deathLog, wwPhase: 'vote_result', voteEliminated: eliminated, voteVoters: voters, abstainCount });
       this.broadcast();
+      // Delay win check so vote_result screen is visible
       setTimeout(() => { if (!this._checkWin()) setTimeout(() => this._startNight(), 2000); }, 3500);
       return;
     }
 
     alive[eliminated] = false;
     deathLog[eliminated] = '被投票放逐';
-    // Hunter killed by vote → skip lover propagation (hunter gets special phase instead)
-    if (role !== 'hunter') this._propagateLoverDeath(alive, deathLog, store.get().game);
 
     store.patchGame({ alive, deathLog, wwPhase: 'vote_result', voteEliminated: eliminated, voteVoters: voters, abstainCount });
     this.broadcast();
@@ -1486,7 +1398,6 @@ class WerewolfEngine {
     const deathLog = Object.assign({}, g.deathLog);
     alive[targetId] = false;
     deathLog[targetId] = '被狼王帶走';
-    this._propagateLoverDeath(alive, deathLog, g);
     store.patchGame({ alive, deathLog, specialPending: null }); this.broadcast();
     if (!this._checkWin()) setTimeout(() => this._startNight(), 2500);
   }
@@ -1494,94 +1405,21 @@ class WerewolfEngine {
   // ── Win ───────────────────────────────────────────────
 
   _checkWin() {
+    // Use freshly-stored game state (callers may have just patched alive)
     const { game: g } = store.get();
-    const alivePids = Object.keys(g.alive).filter(id => g.alive[id]);
-    const roles     = g.roles || {};
-    const lovers    = Array.isArray(g.lovers) ? g.lovers : [];
-    const loverTeam = g.loverTeam;   // 'village' | 'wolf' | 'third' | null
-    const cupidId   = g.cupidId;
-
-    const isWolf = id => roles[id] === 'wolf' || roles[id] === 'wolfking';
-    const aliveWolves = alivePids.filter(isWolf);
-
-    // Are both lovers still alive? (crucial gatekeeper)
-    const loversAlive = lovers.length === 2 && lovers.every(id => alivePids.includes(id));
-
-    const _win = (winner, winReason) => {
-      store.patchGame({ wwPhase: 'end', winner, winReason });
+    const alivePids   = Object.keys(g.alive).filter(id => g.alive[id]);
+    const aliveWolves = alivePids.filter(id => g.roles[id] === 'wolf' || g.roles[id] === 'wolfking');
+    // Village win: all wolves dead (bomber still alive is fine — they're a wildcard)
+    if (aliveWolves.length === 0) {
+      store.patchGame({ wwPhase: 'end', winner: 'village', winReason: '所有狼人已被消滅！村民陣營獲勝！🌅' });
       this.broadcast(); return true;
-    };
-
-    // ══════════════════════════════════════════════════════
-    // CASE A: MIXED LOVERS (一狼一村 → 第三方)
-    // Priority: HIGHEST — lovers alive blocks all other wins
-    // ══════════════════════════════════════════════════════
-    if (loverTeam === 'third') {
-      const thirdIds       = [...new Set([cupidId, ...lovers].filter(Boolean))];
-      const aliveThird     = alivePids.filter(id =>  thirdIds.includes(id));
-      const aliveNonThird  = alivePids.filter(id => !thirdIds.includes(id));
-
-      // 第三方勝: 所有非第三方玩家均已出局
-      if (aliveNonThird.length === 0 && aliveThird.length > 0)
-        return _win('lovers', '情侶完成屠城！第三方陣營獲勝！💘');
-
-      // 兩人都還活著 → 阻斷所有其他勝利條件
-      if (loversAlive) return false;
-
-      // 情侶均已死亡（殉情），恢復正常勝利判斷
-      // 注意：狼人情侶已死，aliveWolves 只包含剩餘的「純狼」
-      const aliveNonThirdWolves = alivePids.filter(id => isWolf(id) && !thirdIds.includes(id));
-      const aliveNonThirdVill   = alivePids.filter(id => !isWolf(id)  && !thirdIds.includes(id));
-      if (aliveNonThirdWolves.length === 0)
-        return _win('village', '所有狼人已消滅！村民陣營獲勝！🌅');
-      if (aliveNonThirdWolves.length >= aliveNonThirdVill.length)
-        return _win('wolves', '狼人數量已不少於其他存活玩家！狼人陣營獲勝！🐺');
-      return false;
     }
-
-    // ══════════════════════════════════════════════════════
-    // CASE B: WOLF-WOLF LOVERS (兩狼情侶)
-    // ══════════════════════════════════════════════════════
-    if (loverTeam === 'wolf') {
-      // 場上有第三隻狼（非情侶）→ 正常狼人勝利條件
-      const extraWolvesAlive = aliveWolves.filter(id => !lovers.includes(id));
-      if (extraWolvesAlive.length > 0) {
-        // 正常判定（有額外狼助陣）
-        if (aliveWolves.length === 0)
-          return _win('village', '所有狼人已消滅！村民陣營獲勝！🌅');
-        const aliveNonWolf = alivePids.filter(id => !isWolf(id));
-        if (aliveWolves.length >= aliveNonWolf.length)
-          return _win('wolves', '狼人數量已不少於其他存活玩家！狼人陣營獲勝！🐺');
-        return false;
-      }
-
-      // 沒有第三隻狼 → 情侶需要屠城才能勝利
-      if (loversAlive) {
-        // 情侶還活著：非情侶存活人數 ≤ 1 才算屠城
-        const aliveNonLover = alivePids.filter(id => !lovers.includes(id));
-        if (aliveNonLover.length <= 1)
-          return _win('lovers', '狼人情侶完成屠城！情侶陣營獲勝！💘');
-        // 情侶還活著但非情侶 ≥ 2 → 阻斷普通狼人勝利（情侶優先）
-        return false;
-      }
-
-      // 兩狼情侶均已死亡 → 恢復正常判定
-      if (aliveWolves.length === 0)
-        return _win('village', '所有狼人已消滅！村民陣營獲勝！🌅');
-      const aliveNonWolf = alivePids.filter(id => !isWolf(id));
-      if (aliveWolves.length >= aliveNonWolf.length)
-        return _win('wolves', '狼人數量已不少於其他存活玩家！狼人陣營獲勝！🐺');
-      return false;
+    // Wolf win: wolves ≥ ALL non-wolf players (including bomber counts against wolves)
+    const aliveNonWolf = alivePids.filter(id => g.roles[id] !== 'wolf' && g.roles[id] !== 'wolfking');
+    if (aliveWolves.length >= aliveNonWolf.length) {
+      store.patchGame({ wwPhase: 'end', winner: 'wolves', winReason: '狼人數量已不少於其他存活玩家！狼人陣營獲勝！🐺' });
+      this.broadcast(); return true;
     }
-
-    // ══════════════════════════════════════════════════════
-    // CASE C: 無情侶 / 兩村情侶 → 正常勝利判定
-    // ══════════════════════════════════════════════════════
-    if (aliveWolves.length === 0)
-      return _win('village', '所有狼人已被消滅！村民陣營獲勝！🌅');
-    const aliveNonWolf = alivePids.filter(id => !isWolf(id));
-    if (aliveWolves.length >= aliveNonWolf.length)
-      return _win('wolves', '狼人數量已不少於其他存活玩家！狼人陣營獲勝！🐺');
     return false;
   }
 
@@ -2425,16 +2263,6 @@ class UIController {
       wwEngine.sendAction({ type: WW_ACTION.NIGHT_DONE });
     });
 
-    // Cupid: confirm pair
-    this._on('btn-cupid-confirm', 'click', function() {
-      wwEngine.sendAction({ type: WW_ACTION.CUPID_CONFIRM });
-    });
-
-    // Lover: acknowledge notification
-    this._on('btn-lover-ack', 'click', function() {
-      wwEngine.sendAction({ type: WW_ACTION.LOVER_ACK });
-    });
-
     // Night toy is now initialized dynamically in _renderWWNight based on player role
 
     // Return to lobby
@@ -2532,28 +2360,6 @@ class UIController {
     }
 
     const phase = g.wwPhase;
-
-    // ── Lover notification modal ─────────────────────────
-    // Show to each lover once cupid has confirmed, until they ack
-    const lovers = g.lovers || [];
-    const amLover = lovers.includes(myId);
-    const loverNotifyModal = document.getElementById('lover-notify-modal');
-    const needsNotify = amLover && g.cupidDone && !(g.loverAcks||{})[myId] && phase !== 'end';
-    if (loverNotifyModal) {
-      loverNotifyModal.classList.toggle('hidden', !needsNotify);
-      if (needsNotify) {
-        // Find partner
-        const partnerId = lovers.find(id => id !== myId);
-        const partnerP  = (players||{})[partnerId] || {};
-        const partnerEl = document.getElementById('lover-partner-name');
-        const avatarEl  = document.getElementById('lover-partner-avatar');
-        if (partnerEl) partnerEl.textContent = partnerP.name || partnerId || '???';
-        if (avatarEl)  {
-          avatarEl.textContent   = (partnerP.name||'?')[0];
-          avatarEl.style.background = Utils.avatarColor(partnerP.name||partnerId||'?');
-        }
-      }
-    }
 
     if (phase === 'role_reveal')  { this._show('ww-panel-role-reveal', true);  this._renderWWRoleReveal(g, myId, isHost, players); }
     if (phase === 'night')        { this._show('ww-panel-night', true);         this._renderWWNight(g, myId, players); }
@@ -2794,52 +2600,16 @@ class UIController {
     const amHunter = myRole === 'hunter';
     const isActive = NIGHT_ACTIVE_ROLES.has(myRole);
     const amDone   = !!(g.nightConfirmed || {})[myId];
-    const amCupid  = myRole === 'cupid';
-    const isPassive = !isActive && !amHunter && !amCupid; // villager, bomber, knight
+    const isPassive = !isActive && !amHunter; // villager, bomber, knight (hunter has own subpanel)
 
     // Each player sees only their own panel simultaneously
     this._show('ww-night-wolf',    amWolf   && !amDone);
     this._show('ww-night-seer',    amSeer   && !amDone);
     this._show('ww-night-witch',   amWitch  && !amDone);
     this._show('ww-night-hunter',  amHunter && !amDone);
-    this._show('ww-night-cupid',   amCupid  && !amDone && !g.cupidDone);
     this._show('ww-night-passive', isPassive && !amDone);
-    // Show waiting scene: active role done, OR passive/hunter/cupid confirmed
-    this._show('ww-night-waiting', (isActive && amDone) || ((isPassive || amHunter || amCupid) && amDone));
-
-    // Cupid panel rendering
-    if (amCupid && !amDone && !g.cupidDone) {
-      const sel = g.cupidSelected || [];
-      // Slot labels
-      const slot0 = document.getElementById('cupid-slot-name-0');
-      const slot1 = document.getElementById('cupid-slot-name-1');
-      if (slot0) slot0.textContent = sel[0] ? ((players[sel[0]]||{}).name||sel[0]) : '—';
-      if (slot1) slot1.textContent = sel[1] ? ((players[sel[1]]||{}).name||sel[1]) : '—';
-      // Highlight slots with selection
-      var s0 = document.getElementById('cupid-slot-0');
-      var s1 = document.getElementById('cupid-slot-1');
-      if (s0) s0.className = 'cupid-slot' + (sel[0] ? ' cupid-slot-filled' : '');
-      if (s1) s1.className = 'cupid-slot' + (sel[1] ? ' cupid-slot-filled' : '');
-      // Grid of all players (including self)
-      const allPids = Object.keys(g.alive||{}).filter(id => g.alive[id]);
-      var cGrid = document.getElementById('ww-cupid-grid');
-      if (cGrid) {
-        cGrid.innerHTML = allPids.map(function(pid) {
-          var p = players[pid] || {};
-          var isSel = sel.includes(pid);
-          var selIdx = sel.indexOf(pid);
-          return '<div class="vote-chip cupid-chip ' + (isSel ? 'selected' : '') + '"' +
-            ' onclick="wwEngine.sendAction({type:WW_ACTION.CUPID_SELECT,targetId:\'' + pid + '\'})">' +
-            '<div class="vote-avatar" style="background:' + Utils.avatarColor(p.name||pid) + '">' + (p.name||'?')[0] + '</div>' +
-            '<span>' + Utils.escapeHtml(p.name||pid) + (pid === myId ? '（你）' : '') + '</span>' +
-            (isSel ? '<span class="vote-tally">' + (selIdx === 0 ? 'A' : 'B') + '</span>' : '') +
-            '</div>';
-        }).join('');
-      }
-      // Enable/disable confirm button
-      var confirmBtn = document.getElementById('btn-cupid-confirm');
-      if (confirmBtn) confirmBtn.disabled = sel.length !== 2;
-    }
+    // Show waiting scene: active role done, OR passive/hunter confirmed
+    this._show('ww-night-waiting', (isActive && amDone) || ((isPassive || amHunter) && amDone));
 
     // Hunter toy — rendered in ww-night-hunter's own toy div
     if (amHunter && !amDone) {
@@ -3525,26 +3295,18 @@ class UIController {
     var winner = g.winner;
     var banner = document.getElementById('ww-end-banner');
     if (banner) {
-      var isLoversWin = winner === 'lovers';
       var isBomberWin = winner === 'bomber';
       var isWolfWin   = winner === 'wolves';
-      var bannerClass = isLoversWin ? 'lovers-win' : isWolfWin ? 'wolf-win' : isBomberWin ? 'bomber-win' : 'village-win';
-      var bannerIcon  = isLoversWin ? '💘' : isWolfWin ? '🐺' : isBomberWin ? '💣' : '🌅';
-      var bannerTitle = isLoversWin ? '第三方陣營獲勝！' : isWolfWin ? '狼人勝利！' : isBomberWin ? '炸彈客單獨獲勝！' : '村民勝利！';
-      banner.className = 'end-banner ' + bannerClass;
+      banner.className = 'end-banner ' + (isWolfWin ? 'wolf-win' : isBomberWin ? 'bomber-win' : 'village-win');
       banner.innerHTML =
-        '<div class="end-icon">' + bannerIcon + '</div>' +
-        '<h2 class="end-title">' + bannerTitle + '</h2>' +
+        '<div class="end-icon">' + (isWolfWin?'🐺':isBomberWin?'💣':'🌅') + '</div>' +
+        '<h2 class="end-title">' + (isWolfWin?'狼人勝利！':isBomberWin?'炸彈客單獨獲勝！':'村民勝利！') + '</h2>' +
         '<p class="end-reason">' + Utils.escapeHtml(g.winReason||'') + '</p>';
     }
 
     var list = document.getElementById('ww-role-reveal-list');
     if (!list) return;
-    var deathLog  = g.deathLog || {};
-    var lovers    = g.lovers || [];
-    var cupidId   = g.cupidId;
-    var loverTeam = g.loverTeam;
-    var thirdPids = loverTeam === 'third' ? [...new Set([cupidId, ...lovers].filter(Boolean))] : [];
+    var deathLog = g.deathLog || {};
 
     // Group: alive first, dead below
     var entries = Object.entries(g.roles||{});
@@ -3556,22 +3318,16 @@ class UIController {
       var role  = ROLES[roleId] || ROLES.villager;
       var isDead = !(g.alive||{})[pid];
       var cause = deathLog[pid] || '';
-      var isLover = lovers.includes(pid);
-      var isCupidThird = thirdPids.includes(pid);
-      var loverBadge = isLover ? '<span class="rr-lover-badge">💕 情侶</span>' : '';
-      var thirdBadge = isCupidThird && roleId === 'cupid' ? '<span class="rr-lover-badge">💘 邱比特</span>' : '';
-      // For display: if third-party, show effective team
-      var effectiveTeamClass = thirdPids.includes(pid) ? 'third' : role.team;
-      return '<div class="rr-row ' + (isDead?'rr-dead-row':'') + ' team-' + effectiveTeamClass + '">' +
+      return '<div class="rr-row ' + (isDead?'rr-dead-row':'') + ' team-' + role.team + '">' +
         '<div class="rr-avatar-wrap">' +
           '<div class="rr-avatar" style="background:' + Utils.avatarColor(p.name||pid) + '">' + (p.name||'?')[0] + '</div>' +
           (isDead ? '<div class="rr-skull">💀</div>' : '') +
         '</div>' +
         '<div class="rr-info">' +
-          '<div class="rr-name">' + Utils.escapeHtml(p.name||pid) + loverBadge + thirdBadge + '</div>' +
+          '<div class="rr-name">' + Utils.escapeHtml(p.name||pid) + '</div>' +
           (isDead && cause ? '<div class="rr-cause">' + Utils.escapeHtml(cause) + '</div>' : '') +
         '</div>' +
-        '<div class="rr-role-badge team-badge-' + effectiveTeamClass + '">' + role.icon + ' ' + role.name + '</div>' +
+        '<div class="rr-role-badge team-badge-' + role.team + '">' + role.icon + ' ' + role.name + '</div>' +
         '<div class="rr-status">' + (isDead ? '<span class="rr-dead">已出局</span>' : '<span class="rr-alive">存活</span>') + '</div>' +
       '</div>';
     };

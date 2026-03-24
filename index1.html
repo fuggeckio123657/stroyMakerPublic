@@ -182,8 +182,6 @@
                 <div class="rc-counter"><button class="role-counter-btn" data-role="knight" data-dir="-1">−</button><span id="ww-count-knight" class="rc-num">0</span><button class="role-counter-btn" data-role="knight" data-dir="1">+</button></div></div>
               <div class="role-row"><span class="rc-icon">💣</span><span class="rc-name">炸彈客</span>
                 <div class="rc-counter"><button class="role-counter-btn" data-role="bomber" data-dir="-1">−</button><span id="ww-count-bomber" class="rc-num">0</span><button class="role-counter-btn" data-role="bomber" data-dir="1">+</button></div></div>
-              <div class="role-row"><span class="rc-icon">💘</span><span class="rc-name">邱比特</span>
-                <div class="rc-counter"><button class="role-counter-btn" data-role="cupid" data-dir="-1">−</button><span id="ww-count-cupid" class="rc-num">0</span><button class="role-counter-btn" data-role="cupid" data-dir="1">+</button></div></div>
             </div>
           </div>
           <div class="form-group">
@@ -446,22 +444,6 @@
           <button id="btn-hunter-pass" class="btn btn-ghost">✓ 我已閉眼，確認等待</button>
         </div>
       </div>
-      <!-- Cupid panel (round 1 only) -->
-      <div id="ww-night-cupid" class="night-subpanel hidden">
-        <div class="night-header">
-          <div class="night-moon">💘</div><h2>邱比特請睜眼</h2>
-          <p class="night-hint">選擇兩位玩家設定為情侶（可包含自己），選好後確認射箭。技能使用前每晚均可行動。</p>
-        </div>
-        <div id="ww-cupid-slots" class="cupid-slots">
-          <div class="cupid-slot" id="cupid-slot-0"><span class="cupid-slot-label">情侶 A</span><span class="cupid-slot-name" id="cupid-slot-name-0">—</span></div>
-          <div class="cupid-heart">💕</div>
-          <div class="cupid-slot" id="cupid-slot-1"><span class="cupid-slot-label">情侶 B</span><span class="cupid-slot-name" id="cupid-slot-name-1">—</span></div>
-        </div>
-        <div id="ww-cupid-grid" class="player-vote-grid"></div>
-        <div class="night-footer">
-          <button id="btn-cupid-confirm" class="btn btn-primary" disabled>💘 射箭！確認這對情侶</button>
-        </div>
-      </div>
       <div id="ww-night-waiting" class="night-subpanel hidden">
         <div class="night-wait-scene">
           <div class="stars"><span>✦</span><span>✦</span><span>✦</span><span>✦</span><span>✦</span></div>
@@ -561,24 +543,6 @@
       <div id="ww-role-reveal-list" class="role-reveal-list"></div>
       <div class="ww-end-footer">
         <button id="btn-ww-back-lobby" class="btn btn-ghost">← 返回房間大廳</button>
-      </div>
-    </div>
-
-    <!-- Lover Notification Modal — shown as overlay to each lover once paired -->
-    <div id="lover-notify-modal" class="lover-notify-modal hidden">
-      <div class="lover-notify-card">
-        <div class="lover-notify-hearts">💘</div>
-        <h2 class="lover-notify-title">你被邱比特的箭射中了！</h2>
-        <p class="lover-notify-sub">你與另一位玩家成為情侶，命運從此相連。</p>
-        <div class="lover-partner-row">
-          <div class="lover-partner-avatar" id="lover-partner-avatar">?</div>
-          <div class="lover-partner-info">
-            <div class="lover-partner-label">你的情侶是</div>
-            <div class="lover-partner-name" id="lover-partner-name">???</div>
-          </div>
-        </div>
-        <p class="lover-notify-rule">⚠️ 若對方死亡，你將立刻殉情死亡（不可發動技能）。</p>
-        <button id="btn-lover-ack" class="btn btn-primary">💕 我明白了</button>
       </div>
     </div>
 
