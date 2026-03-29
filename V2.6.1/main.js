@@ -925,7 +925,6 @@ class WerewolfEngine {
     this.broadcast();
   }
 
-
   // ── Night (simultaneous) ──────────────────────────────
   // All role-players act at the same time. Night ends when every
   // active-role player confirms their action OR the timer expires.
@@ -2195,9 +2194,6 @@ class UIController {
 
     // ── Werewolf: start game ────────────────────────────
     this._on('btn-start-ww', 'click', function() {
-      alert('因檢測到狼人殺遊戲中有重大bug，故暫時關閉該功能');
-      return;
-      
       var players    = store.get().players;
       var activePlayers = Object.values(players).filter(function(p) { return !p.isSpectator; });
       var n          = activePlayers.length;
