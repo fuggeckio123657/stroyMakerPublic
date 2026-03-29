@@ -54,6 +54,13 @@
           <div class="hmp-desc">推理對抗 · 陣營博弈</div>
         </div>
       </div>
+      <div class="home-mode-pill hmp-chaos">
+        <span class="hmp-icon">🎲</span>
+        <div>
+          <div class="hmp-name">規則混亂</div>
+          <div class="hmp-desc">創意改句 · 投票評分</div>
+        </div>
+      </div>
     </div>
 
     <!-- Form card -->
@@ -68,6 +75,11 @@
         <div class="home-join-row">
           <input type="text" id="input-room-code" class="home-field home-code-field" placeholder="房間代碼" maxlength="6" autocomplete="off" style="text-transform:uppercase">
           <button id="btn-join-room" class="home-btn-secondary">加入</button>
+        </div>
+        <!-- Loading bar — shown during async join/create -->
+        <div id="home-loading-bar" class="home-loading-bar hidden">
+          <div class="home-loading-track"><div class="home-loading-fill"></div></div>
+          <span class="home-loading-txt">處理中…</span>
         </div>
         <div id="home-error" class="error-msg hidden" style="margin-top:12px"></div>
       </div>
@@ -132,6 +144,7 @@
         <div class="game-type-switcher">
           <button class="game-type-btn active" data-type="story">📖 故事接龍</button>
           <button class="game-type-btn" data-type="werewolf">🐺 狼人殺</button>
+          <button class="game-type-btn" data-type="chaos">🎲 規則混亂</button>
         </div>
 
         <!-- Story Settings -->
@@ -194,7 +207,33 @@
             <label for="ww-vote-time">投票計時時限（秒）</label>
             <input type="number" id="ww-vote-time" value="60" min="20" max="180">
           </div>
-          <button id="btn-start-ww" class="btn btn-primary btn-full ww-start-btn">開始狼人殺 🐺(🚫功能現不開放🚫)</button>
+          <button id="btn-start-ww" class="btn btn-primary btn-full ww-start-btn">開始狼人殺 🐺</button>
+        </div>
+
+        <!-- Chaos Settings -->
+        <div id="chaos-settings" class="hidden">
+          <div class="form-row">
+            <div class="form-group half">
+              <label for="chaos-rounds">回合數</label>
+              <input type="number" id="chaos-rounds" value="5" min="2" max="15">
+            </div>
+            <div class="form-group half">
+              <label for="chaos-write-time">寫句子時限（秒）</label>
+              <input type="number" id="chaos-write-time" value="60" min="20" max="180">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group half">
+              <label for="chaos-modify-time">修改時限（秒）</label>
+              <input type="number" id="chaos-modify-time" value="60" min="20" max="180">
+            </div>
+            <div class="form-group half">
+              <label for="chaos-vote-time">每張投票時限（秒）</label>
+              <input type="number" id="chaos-vote-time" value="20" min="10" max="60">
+            </div>
+          </div>
+          <p class="round-hint">每回合：寫句子 → 抽規則 → 修改別人的句子 → 評分投票</p>
+          <button id="btn-start-chaos" class="btn btn-primary btn-full">開始規則混亂 🎲</button>
         </div>
 
         <div id="room-error" class="error-msg hidden"></div>
@@ -580,6 +619,128 @@
         <p class="lover-notify-rule">⚠️ 若對方死亡，你將立刻殉情死亡（不可發動技能）。</p>
         <button id="btn-lover-ack" class="btn btn-primary">💕 我明白了</button>
       </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══ CHAOS GAME ════════════════════════════════════════ -->
+<div id="screen-chaos-game" class="screen hidden">
+  <div class="bg-noise"></div>
+  <div class="chaos-wrap">
+
+    <!-- Spectator overlay -->
+    <div id="chaos-spectator-overlay" class="ww-spectator-overlay hidden">
+      <div class="spec-badge">👁 觀戰模式</div>
+      <div id="chaos-spectator-content" class="chaos-spectator-content"></div>
+    </div>
+
+    <!-- Header -->
+    <header class="chaos-header">
+      <span id="chaos-header-info" class="chaos-header-info">規則混亂</span>
+      <div id="chaos-timer-wrap" class="chaos-timer-wrap hidden">
+        <span class="chaos-timer-label">剩餘</span>
+        <span id="chaos-timer-val" class="chaos-timer-val">60</span>
+        <span class="chaos-timer-label">秒</span>
+      </div>
+    </header>
+
+    <!-- WRITE SENTENCE -->
+    <div id="chaos-panel-write-sentence" class="chaos-panel hidden">
+      <div class="chaos-phase-title">✏️ 寫下你的初始句子</div>
+      <div class="chaos-phase-hint">可以是任何內容：敘述句、廢話、奇怪的話都行</div>
+      <div class="chaos-input-group">
+        <label class="chaos-label">📝 你的句子</label>
+        <textarea id="chaos-sentence-input" class="chaos-textarea" placeholder="例如：今天的天氣很好" rows="3" maxlength="200"></textarea>
+      </div>
+      <button id="btn-chaos-submit-sentence" class="btn btn-primary btn-full">✦ 提交句子</button>
+      <button id="btn-chaos-unsubmit-sentence" class="btn btn-ghost btn-full hidden" style="margin-top:6px">↩ 取消，重新編輯</button>
+      <div id="chaos-sentence-progress" class="chaos-progress-text">0 / 0 人已提交</div>
+    </div>
+
+    <!-- WRITE RULE -->
+    <div id="chaos-panel-write-rule" class="chaos-panel hidden">
+      <div class="chaos-phase-title">📜 為你的句子制定一條規則</div>
+      <div class="chaos-phase-hint">其他人要依照你的規則來修改別人的句子</div>
+      <div class="chaos-your-sentence-box">
+        <span class="chaos-label">你剛才寫的句子：</span>
+        <div class="chaos-original-text" id="chaos-your-sentence"></div>
+      </div>
+      <div class="chaos-input-group">
+        <label class="chaos-label">📜 你的規則</label>
+        <textarea id="chaos-rule-input" class="chaos-textarea" placeholder="例如：句子要像老師罵人" rows="2" maxlength="100"></textarea>
+      </div>
+      <button id="btn-chaos-submit-rule" class="btn btn-primary btn-full">✦ 提交規則</button>
+      <button id="btn-chaos-unsubmit-rule" class="btn btn-ghost btn-full hidden" style="margin-top:6px">↩ 取消，重新編輯</button>
+      <div id="chaos-rule-progress" class="chaos-progress-text">0 / 0 人已提交</div>
+    </div>
+
+    <!-- RULE REVEAL -->
+    <div id="chaos-panel-rule-reveal" class="chaos-panel hidden">
+      <div class="chaos-phase-title">🎲 本回合規則出爐！</div>
+      <div class="chaos-rule-reveal-card">
+        <div class="chaos-rule-big" id="chaos-rule-text"></div>
+      </div>
+      <div class="chaos-rule-author" id="chaos-rule-author"></div>
+    </div>
+
+    <!-- MODIFY -->
+    <div id="chaos-panel-modify" class="chaos-panel hidden">
+      <div class="chaos-phase-title">🔧 修改別人的句子，使其符合規則！</div>
+      <div class="chaos-modify-rule-box">
+        <span class="chaos-label">本回合規則：</span>
+        <span class="chaos-modify-rule-text" id="chaos-modify-rule"></span>
+      </div>
+      <div class="chaos-modify-original-box">
+        <span class="chaos-label">你收到的句子：</span>
+        <div class="chaos-original-text" id="chaos-modify-original"></div>
+      </div>
+      <div class="chaos-input-group">
+        <label class="chaos-label">✏️ 修改後的句子</label>
+        <textarea id="chaos-modify-input" class="chaos-textarea" placeholder="修改以符合規則…" rows="2" maxlength="300"></textarea>
+      </div>
+      <button id="btn-chaos-submit-modify" class="btn btn-primary btn-full">✦ 提交修改結果</button>
+      <button id="btn-chaos-unsubmit-modify" class="btn btn-ghost btn-full hidden" style="margin-top:6px">↩ 取消，重新修改</button>
+      <div id="chaos-modify-progress" class="chaos-progress-text">0 / 0 人已完成</div>
+    </div>
+
+    <!-- VOTE REVEAL: full-screen single card -->
+    <div id="chaos-panel-vote-reveal" class="chaos-panel hidden">
+      <div class="chaos-vote-header">
+        <span class="chaos-display-rule">規則：<span id="chaos-vr-rule"></span></span>
+        <span id="chaos-vote-card-counter" class="chaos-card-counter"></span>
+      </div>
+      <div id="chaos-vr-grid"></div>
+      <!-- Persistent elements outside the per-card rebuild zone -->
+      <div id="cvr-confirm-wrap" class="cvr-persistent"></div>
+      <div id="cvr-progress" class="chaos-card-progress"></div>
+      <div class="chaos-vr-legend">
+        <span class="vote-violation-label">❌ 違規 −2</span>
+        <span class="vote-normal-label">👍 普通 +1</span>
+        <span class="vote-great-label">⭐ 超棒 +4</span>
+        <span class="vote-bonus-label">💫 最喜歡</span>
+      </div>
+      <div class="chaos-reactions-row" id="cvr-react-btns"></div>
+      <div class="chaos-reactions-stage" id="cvr-react-stage"></div>
+    </div>
+
+    <!-- ROUND RESULT -->
+    <div id="chaos-panel-round-result" class="chaos-panel hidden">
+      <div class="chaos-phase-title">📊 本回合結果</div>
+      <div id="chaos-round-result-list" class="chaos-result-list"></div>
+      <button id="btn-chaos-next-round" class="btn btn-primary btn-full hidden" style="margin-top:12px">➡ 下一回合</button>
+    </div>
+
+    <!-- END -->
+    <div id="chaos-panel-end" class="chaos-panel hidden">
+      <div class="chaos-end-header">
+        <div class="chaos-end-trophy">🏆</div>
+        <div class="chaos-phase-title">最終排行榜</div>
+      </div>
+      <div id="chaos-end-list" class="chaos-result-list"></div>
+      <div id="chaos-end-badges" class="chaos-end-badges"></div>
+      <button id="btn-chaos-end-reveal" class="btn btn-secondary btn-full hidden" style="margin-top:12px">✦ 揭露下一個獎項</button>
+      <button id="btn-chaos-back-lobby" class="btn btn-ghost btn-full" style="margin-top:8px">← 返回大廳</button>
     </div>
 
   </div>

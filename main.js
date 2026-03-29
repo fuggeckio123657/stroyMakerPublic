@@ -73,6 +73,9 @@ const WW_ACTION = {
   KNIGHT_REVEAL    : 'ww_knight_reveal',  // knight reveals self before challenging
   KNIGHT_CHALLENGE : 'ww_knight_challenge',
   WOLFKING_SECRET  : 'ww_wolfking_secret',// wolfking picks secret target after death
+  HUNTER_PASS      : 'ww_hunter_pass_shot',  // hunter forfeits their shot
+  HUNTER_DECIDE    : 'ww_hunter_decide',       // hunter privately decides to shoot (triggers public phase)
+  WOLFKING_PASS    : 'ww_wolfking_pass',      // wolfking forfeits takedown
   CUPID_SELECT     : 'ww_cupid_select',   // cupid toggles a lover candidate
   CUPID_CONFIRM    : 'ww_cupid_confirm',  // cupid locks in the pair
   LOVER_ACK        : 'ww_lover_ack',      // lover dismisses the notification
@@ -251,6 +254,7 @@ const makeWerewolfGame = () => ({
   voteEliminated       : null,
   voteVoters           : [],
   specialPending       : null,
+  hunterDecidePending  : null,  // { pid, cause } — hunter privately deciding whether to shoot
   winner               : null,
   winReason            : '',
   deathLog             : {},  // { pid: causeString }
@@ -342,6 +346,9 @@ class FirebaseTransport {
     });
     this.ref('rooms/' + code + '/players/' + hostId).onDisconnect().remove();
     this.ref('rooms/' + code + '/info/host').onDisconnect().set(null);
+    // Host-alone case: if host closes browser and is the only player, delete room server-side
+    this.ref('rooms/' + code).onDisconnect().remove();
+    this._registerRoomCleanup(code, hostId);
   }
 
   async addPlayer(code, pid, name, isSpectator) {
@@ -349,6 +356,9 @@ class FirebaseTransport {
       name, joinedAt: Date.now(), isSpectator: !!isSpectator,
     });
     this.ref('rooms/' + code + '/players/' + pid).onDisconnect().remove();
+    // Cancel the room-level onDisconnect that host set (room is no longer host-only)
+    this.ref('rooms/' + code).onDisconnect().cancel().catch(() => {});
+    this._registerRoomCleanup(code, pid);
   }
 
   async removePlayer(code, pid) {
@@ -394,8 +404,35 @@ class FirebaseTransport {
       const pRef = this.ref('rooms/' + code + '/players/' + pid);
       pRef.set({ name, joinedAt: Date.now(), isSpectator: !!isSpectator });
       pRef.onDisconnect().remove();
+      this._registerRoomCleanup(code, pid);
     });
     this._off.push(() => connRef.off('value', h));
+  }
+
+  // Register a per-player presence key with onDisconnect auto-remove.
+  // Room cleanup is handled in watchPlayers (child_removed triggers empty check).
+  _registerRoomCleanup(code, pid) {
+    const presenceRef = this.ref('rooms/' + code + '/presence/' + pid);
+    presenceRef.set(true);
+    presenceRef.onDisconnect().remove();
+  }
+
+  // Room-empty watcher: watch PLAYERS node directly.
+  // When any player's node is removed (by onDisconnect or hardLeave),
+  // Firebase fires child_removed on all connected clients.
+  // That handler checks if players is now empty and deletes the room.
+  // This covers: last-player-presses-leave ✓, second-to-last closes browser ✓
+  // Host-alone-closes-browser is handled by room.onDisconnect().remove() in createRoom.
+  _watchRoomEmpty(code) {
+    const playersRef = this.ref('rooms/' + code + '/players');
+    const h = playersRef.on('child_removed', () => {
+      playersRef.get().then(snap => {
+        if (!snap.exists() || Object.keys(snap.val() || {}).length === 0) {
+          this.ref('rooms/' + code).remove().catch(() => {});
+        }
+      }).catch(() => {});
+    });
+    this._off.push(() => playersRef.off('child_removed', h));
   }
 
   // ── Settings sync: host writes, non-hosts read live ───
@@ -545,13 +582,16 @@ class RoomManager {
   }
 
   _listen(roomCode, myId, isHost) {
-    // Player presence (everyone)
+    // Player presence
     transport.watchPlayers(
       roomCode,
       (pid, data) => bus.emit(EVT.PLAYER_JOINED,  { id: pid, name: data.name, isSpectator: !!data.isSpectator }),
       (pid)       => bus.emit(EVT.PLAYER_LEFT,    { id: pid }),
       (pid, data) => bus.emit(EVT.PLAYER_CHANGED, { id: pid, name: data.name, isSpectator: !!data.isSpectator }),
     );
+
+    // Room-empty watcher: auto-deletes room when all presence nodes gone (browser close)
+    transport._watchRoomEmpty(roomCode);
 
     // Game state: non-hosts receive from Firebase; host is the source and ignores own writes
     transport.watchGameState(roomCode, game => {
@@ -721,7 +761,12 @@ class GameEngine {
       t = Math.max(0, t - 1);
       store.patchGame({ timeLeft: t });
       this.broadcastState();
-      if (t <= 0) { this.stopTimer(); setTimeout(() => storyRelay.advance(), 3000); }
+      if (t <= 0) {
+        this.stopTimer();
+        // Track the timer-triggered advance so checkAllLocked can cancel it
+        clearTimeout(storyRelay._timerAdvTimer);
+        storyRelay._timerAdvTimer = setTimeout(() => storyRelay.advance(), 3000);
+      }
     }, 1000);
   }
 
@@ -750,7 +795,7 @@ const gameEngine = new GameEngine();
 // ═══════════════════════════════════════════════════════════════════════
 
 class StoryRelay {
-  constructor() { this._advTimer = null; }
+  constructor() { this._advTimer = null; this._timerAdvTimer = null; }
 
   handleLock(playerId, text) {
     if (!text || !text.trim()) return;
@@ -783,8 +828,13 @@ class StoryRelay {
   }
 
   advance() {
+    // Cancel any timer-scheduled advance (prevents double-advance after auto-lock)
+    clearTimeout(this._timerAdvTimer); this._timerAdvTimer = null;
+    clearTimeout(this._advTimer);      this._advTimer = null;
     gameEngine.stopTimer();
     const { game, players } = store.get();
+    // Guard: only advance if still in WRITING phase
+    if (!game || game.phase !== PHASE.WRITING) return;
     const stories = Utils.deepClone(game.stories);
 
     // Auto-lock any players who haven't submitted yet (time ran out)
@@ -881,6 +931,9 @@ class WerewolfEngine {
     else if (t === WW_ACTION.KNIGHT_REVEAL)    this._knightReveal(pid);
     else if (t === WW_ACTION.KNIGHT_CHALLENGE) this._knightChallenge(pid, a.targetId);
     else if (t === WW_ACTION.WOLFKING_SECRET)  this._wolfkingSecret(pid, a.targetId);
+    else if (t === WW_ACTION.HUNTER_PASS)      this._hunterPass(pid);
+    else if (t === WW_ACTION.HUNTER_DECIDE)    this._hunterDecide(pid);
+    else if (t === WW_ACTION.WOLFKING_PASS)    this._wolfkingPass(pid);
     else if (t === WW_ACTION.CUPID_SELECT)     this._cupidSelect(pid, a.targetId);
     else if (t === WW_ACTION.CUPID_CONFIRM)    this._cupidConfirm(pid);
     else if (t === WW_ACTION.LOVER_ACK)        this._loverAck(pid);
@@ -924,7 +977,6 @@ class WerewolfEngine {
     }));
     this.broadcast();
   }
-
 
   // ── Night (simultaneous) ──────────────────────────────
   // All role-players act at the same time. Night ends when every
@@ -1229,9 +1281,9 @@ class WerewolfEngine {
     setTimeout(() => {
       if (this._checkWin()) return;
       if (hunterWolfKilled) {
-        // Trigger public hunter special after win check
+        // Hunter gets private decision before public reveal
         const hunterPid = g.wolfTarget;
-      store.patchGame({ wwPhase: 'special', specialPending: { type: 'hunter', pid: hunterPid, cause: 'wolf' } });
+        store.patchGame({ hunterDecidePending: { pid: hunterPid, cause: 'wolf' } });
         this.broadcast();
       }
     }, 4000);
@@ -1452,12 +1504,8 @@ class WerewolfEngine {
     setTimeout(() => {
       if (this._checkWin()) return;
       if (role === 'hunter') {
-        // Hunter voted out → public special phase for everyone to watch
-        store.patchGame({
-          wwPhase: 'special',
-          specialPending: { type: 'hunter', pid: eliminated, cause: 'vote' },
-          hunterCanShoot: true, hunterShootCause: 'vote',
-        });
+        // Hunter voted out → private decision first (silent or reveal)
+        store.patchGame({ hunterDecidePending: { pid: eliminated, cause: 'vote' } });
         this.broadcast();
       } else {
         this._startNight();
@@ -1469,13 +1517,64 @@ class WerewolfEngine {
 
   _wolfkingSecret(pid, targetId) {
     const g = store.get().game;
-    // wolfking can pick secret target whenever they're dead and haven't chosen yet
     if ((g.roles || {})[pid] !== 'wolfking') return;
-    if ((g.alive || {})[pid]) return;          // must be dead
-    if (g.wolfkingSecretReady) return;          // already chosen
+    if ((g.alive || {})[pid]) return;
+    if (g.wolfkingSecretReady) return;
     if (!g.alive[targetId]) return;
+    // Witch-killed wolfking cannot use ability
+    if ((g.deathLog || {})[pid] === '被女巫毒殺') return;
     store.patchGame({ wolfkingSecretTarget: targetId, wolfkingSecretReady: true });
     this.broadcast();
+  }
+
+  _hunterPass(pid) {
+    const g = store.get().game;
+    // Can pass from either private decide phase or public special phase
+    const hdp = g.hunterDecidePending;
+    const sp  = g.specialPending;
+    if (hdp && hdp.pid === pid) {
+      // Private decision: hunter chose not to shoot — silent death
+      const cause = hdp.cause || 'vote';
+      store.patchGame({ hunterDecidePending: null, hunterShot: true });
+      this.broadcast();
+      if (!this._checkWin()) {
+        if (cause === 'wolf') setTimeout(() => this._startDiscuss(), 2000);
+        else setTimeout(() => this._startNight(), 2000);
+      }
+      return;
+    }
+    if (sp && sp.type === 'hunter' && sp.pid === pid) {
+      const cause = sp.cause || 'vote';
+      store.patchGame({ specialPending: null, hunterShot: true });
+      this.broadcast();
+      if (!this._checkWin()) {
+        if (cause === 'wolf') setTimeout(() => this._startDiscuss(), 2000);
+        else setTimeout(() => this._startNight(), 2000);
+      }
+    }
+  }
+
+  _hunterDecide(pid) {
+    // Hunter chose to shoot — escalate to public special phase
+    const g = store.get().game;
+    const hdp = g.hunterDecidePending;
+    if (!hdp || hdp.pid !== pid) return;
+    store.patchGame({
+      hunterDecidePending: null,
+      wwPhase: 'special',
+      specialPending: { type: 'hunter', pid: hdp.pid, cause: hdp.cause },
+      hunterCanShoot: true, hunterShootCause: hdp.cause,
+    });
+    this.broadcast();
+  }
+
+  _wolfkingPass(pid) {
+    const g = store.get().game;
+    if (g.wwPhase !== 'special') return;
+    const sp = g.specialPending;
+    if (!sp || sp.type !== 'wolfking' || sp.pid !== pid) return;
+    store.patchGame({ specialPending: null }); this.broadcast();
+    if (!this._checkWin()) setTimeout(() => this._startNight(), 2000);
   }
 
   _wolfkingShoot(pid, targetId) {
@@ -1603,7 +1702,389 @@ class WerewolfEngine {
   stopTimer() { clearInterval(this._timer); this._timer = null; }
 }
 
-const wwEngine = new WerewolfEngine();
+const CHAOS_ACTION = {
+  SUBMIT_SENTENCE  : 'chaos_submit_sentence',
+  UNSUBMIT_SENTENCE: 'chaos_unsubmit_sentence',
+  SUBMIT_RULE      : 'chaos_submit_rule',
+  UNSUBMIT_RULE    : 'chaos_unsubmit_rule',
+  SUBMIT_MODIFY    : 'chaos_submit_modify',
+  UNSUBMIT_MODIFY  : 'chaos_unsubmit_modify',
+  VOTE_CARD        : 'chaos_vote_card',       // select rating for current card
+  CONFIRM_CARD     : 'chaos_confirm_card',    // lock vote for current card
+  BONUS_VOTE       : 'chaos_bonus_vote',      // favourite overall (any time during vote_reveal)
+  HOST_NEXT_ROUND  : 'chaos_next_round',
+  END_REVEAL_NEXT  : 'chaos_end_reveal_next',
+  REACT            : 'chaos_react',           // emoji reaction
+  RETURN_LOBBY     : 'chaos_return_lobby',
+};
+
+const CHAOS_SCORE = { violation: -2, normal: 1, great: 4 };
+
+// chaosPhase: write_sentence | write_rule | rule_reveal | modify | vote_reveal | round_result | end
+const makeChaosGame = () => ({
+  gameType          : 'chaos',
+  chaosPhase        : 'write_sentence',
+  chaosRound        : 1,
+  totalRounds       : 5,
+  writeTime         : 60,
+  modifyTime        : 60,
+  voteTime          : 20,   // seconds per card
+  timeLeft          : 60,
+  sentences         : {},
+  rules             : {},
+  selectedRule      : '',
+  selectedRuleAuthor: null,
+  assignments       : {},
+  revealOrder       : [],   // shuffled editorPid array
+  voteCardIndex     : 0,    // which card is currently being voted on
+  modifications     : {},
+  // votes[voterPid][editorPid] = 'violation'|'normal'|'great'
+  votes             : {},
+  // cardConfirmed[voterPid] = true when they locked vote for current card
+  cardConfirmed     : {},
+  bonusVotes        : {},   // { voterPid: editorPid } — cancellable
+  scores            : {},
+  roundScores       : {},
+  bonusScores       : {},
+  greatCounts       : {},
+  violationCounts   : {},
+  endRevealStep     : 0,
+  reactions         : {},   // { pid: emoji } — live emoji reactions during reveal
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// LAYER 10c ─ Chaos Engine (規則混亂)
+// ═══════════════════════════════════════════════════════════════════════
+
+class ChaosEngine {
+  constructor() {
+    this._timer = null;
+    bus.on(EVT.ACTION_RECEIVED, ({ action }) => {
+      if (!store.get().isHost) return;
+      if ((store.get().game || {}).gameType !== 'chaos') return;
+      this._dispatch(action);
+    });
+  }
+
+  _dispatch(a) {
+    const t = a.type, pid = a.playerId;
+    if      (t === CHAOS_ACTION.SUBMIT_SENTENCE)   this._submitSentence(pid, a.text);
+    else if (t === CHAOS_ACTION.UNSUBMIT_SENTENCE)  this._unsubmitSentence(pid);
+    else if (t === CHAOS_ACTION.SUBMIT_RULE)        this._submitRule(pid, a.text);
+    else if (t === CHAOS_ACTION.UNSUBMIT_RULE)      this._unsubmitRule(pid);
+    else if (t === CHAOS_ACTION.SUBMIT_MODIFY)      this._submitModify(pid, a.text);
+    else if (t === CHAOS_ACTION.UNSUBMIT_MODIFY)    this._unsubmitModify(pid);
+    else if (t === CHAOS_ACTION.VOTE_CARD)          this._voteCard(pid, a.rating);
+    else if (t === CHAOS_ACTION.CONFIRM_CARD)       this._confirmCard(pid);
+    else if (t === CHAOS_ACTION.BONUS_VOTE)         this._bonusVote(pid, a.targetPid);
+    else if (t === CHAOS_ACTION.HOST_NEXT_ROUND)    this._hostNextRound();
+    else if (t === CHAOS_ACTION.END_REVEAL_NEXT)    this._endRevealNext();
+    else if (t === CHAOS_ACTION.REACT)              this._react(pid, a.emoji);
+    else if (t === CHAOS_ACTION.RETURN_LOBBY)       this._returnLobby();
+  }
+
+  startGame(cfg) {
+    const { players } = store.get();
+    const pids = Object.keys(players).filter(pid => !players[pid].isSpectator);
+    const z = (k) => { const o = {}; pids.forEach(p => o[p] = k); return o; };
+    store.replaceGame(Object.assign(makeChaosGame(), {
+      totalRounds: cfg.totalRounds || 5, writeTime: cfg.writeTime || 60,
+      modifyTime: cfg.modifyTime || 60,  voteTime: cfg.voteTime || 20,
+      timeLeft: cfg.writeTime || 60, chaosRound: 1, chaosPhase: 'write_sentence',
+      scores: z(0), greatCounts: z(0), violationCounts: z(0), bonusScores: z(0),
+    }));
+    this.broadcast();
+    this._startTimer(cfg.writeTime || 60, () => this._resolveWriteSentence());
+  }
+
+  // ── write_sentence ────────────────────────────────────
+
+  _submitSentence(pid, text) {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'write_sentence') return;
+    store.patchGame({ sentences: Object.assign({}, g.sentences, { [pid]: text || '（未輸入）' }) });
+    this.broadcast();
+    const fresh = store.get().game;
+    if (this._activePids().every(p => fresh.sentences[p])) { this.stopTimer(); this._resolveWriteSentence(); }
+  }
+
+  _unsubmitSentence(pid) {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'write_sentence') return;
+    const sentences = Object.assign({}, g.sentences); delete sentences[pid];
+    store.patchGame({ sentences }); this.broadcast();
+  }
+
+  _resolveWriteSentence() {
+    const g = store.get().game; const pids = this._activePids();
+    const sentences = Object.assign({}, g.sentences);
+    pids.forEach(p => { if (!sentences[p]) sentences[p] = '（未輸入）'; });
+    store.patchGame({ chaosPhase: 'write_rule', sentences, rules: {}, timeLeft: g.writeTime });
+    this.broadcast();
+    this._startTimer(g.writeTime, () => this._resolveWriteRule());
+  }
+
+  // ── write_rule ────────────────────────────────────────
+
+  _submitRule(pid, text) {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'write_rule') return;
+    store.patchGame({ rules: Object.assign({}, g.rules, { [pid]: text || '句子要很有趣' }) });
+    this.broadcast();
+    const fresh = store.get().game;
+    if (this._activePids().every(p => fresh.rules[p])) { this.stopTimer(); this._resolveWriteRule(); }
+  }
+
+  _unsubmitRule(pid) {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'write_rule') return;
+    const rules = Object.assign({}, g.rules); delete rules[pid];
+    store.patchGame({ rules }); this.broadcast();
+  }
+
+  _resolveWriteRule() {
+    const g = store.get().game; const pids = this._activePids();
+    const sentences = Object.assign({}, g.sentences), rules = Object.assign({}, g.rules);
+    pids.forEach(p => { if (!sentences[p]) sentences[p] = '（未輸入）'; if (!rules[p]) rules[p] = '句子要很有趣'; });
+    const chosen = pids.map(p => ({ pid: p, rule: rules[p] }))[Math.floor(Math.random() * pids.length)] || { pid: null, rule: '句子要很有趣' };
+    const shuffled = this._derange(pids);
+    const assignments = {}; pids.forEach((p, i) => { assignments[shuffled[i]] = p; });
+    const bonusScores = Object.assign({}, g.bonusScores); pids.forEach(p => { bonusScores[p] = 0; });
+    store.patchGame({
+      chaosPhase: 'rule_reveal', sentences, rules,
+      selectedRule: chosen.rule, selectedRuleAuthor: chosen.pid,
+      assignments, modifications: {}, revealOrder: [], voteCardIndex: 0,
+      votes: {}, cardConfirmed: {}, bonusVotes: {}, roundScores: {}, bonusScores,
+      reactions: {}, timeLeft: 5,
+    });
+    this.broadcast();
+    // Count down 5→0 then start modify
+    let t = 5;
+    const tick = setInterval(() => {
+      t = Math.max(0, t - 1);
+      store.patchGame({ timeLeft: t });
+      this.broadcast();
+      if (t <= 0) { clearInterval(tick); this._startModify(); }
+    }, 1000);
+  }
+
+  // ── modify ────────────────────────────────────────────
+
+  _startModify() {
+    const g = store.get().game;
+    store.patchGame({ chaosPhase: 'modify', timeLeft: g.modifyTime });
+    this.broadcast();
+    this._startTimer(g.modifyTime, () => this._resolveModify());
+  }
+
+  _submitModify(pid, text) {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'modify') return;
+    store.patchGame({ modifications: Object.assign({}, g.modifications, { [pid]: text || '（未修改）' }) });
+    this.broadcast();
+    const fresh = store.get().game;
+    if (this._activePids().every(p => fresh.modifications[p])) { this.stopTimer(); this._resolveModify(); }
+  }
+
+  _unsubmitModify(pid) {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'modify') return;
+    const modifications = Object.assign({}, g.modifications); delete modifications[pid];
+    store.patchGame({ modifications }); this.broadcast();
+  }
+
+  _resolveModify() {
+    const g = store.get().game; const pids = this._activePids();
+    const modifications = Object.assign({}, g.modifications);
+    pids.forEach(p => { if (!modifications[p]) modifications[p] = '（未修改）'; });
+    const revealOrder = Utils.shuffle(pids.slice());
+    store.patchGame({ chaosPhase: 'vote_reveal', modifications, revealOrder, voteCardIndex: 0, votes: {}, cardConfirmed: {}, bonusVotes: {}, reactions: {}, timeLeft: g.voteTime });
+    this.broadcast();
+    this._startTimer(g.voteTime, () => this._cardTimerExpired());
+  }
+
+  // ── vote_reveal: one card at a time with timer ─────────
+
+  _voteCard(pid, rating) {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'vote_reveal') return;
+    if (!['violation','normal','great'].includes(rating)) return;
+    const order   = g.revealOrder || [];
+    const cardIdx = typeof g.voteCardIndex === 'number' ? g.voteCardIndex : 0;
+    if (cardIdx >= order.length) return;
+    const targetPid = order[cardIdx];
+    if (targetPid === pid) return; // can't vote self
+    // Store vote (overwrite if changes mind before confirming)
+    const votes = Utils.deepClone(g.votes || {});
+    if (!votes[pid]) votes[pid] = {};
+    votes[pid][targetPid] = rating;
+    store.patchGame({ votes }); this.broadcast();
+  }
+
+  _confirmCard(pid) {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'vote_reveal') return;
+    const order   = g.revealOrder || [];
+    const cardIdx = typeof g.voteCardIndex === 'number' ? g.voteCardIndex : 0;
+    if (cardIdx >= order.length) return;
+    const targetPid = order[cardIdx];
+    // Self-card: auto-confirm with no vote required
+    const myVote  = (g.votes[pid] || {})[targetPid];
+    if (targetPid !== pid && !myVote) return; // must have selected a rating first
+    const cardConfirmed = Object.assign({}, g.cardConfirmed, { [pid]: true });
+    store.patchGame({ cardConfirmed }); this.broadcast();
+    // Check if all confirmed
+    if (this._activePids().every(p => cardConfirmed[p])) {
+      this.stopTimer(); this._advanceCard();
+    }
+  }
+
+  _cardTimerExpired() {
+    // Auto-confirm everyone who hasn't yet (give them violation or keep pending)
+    this._advanceCard();
+  }
+
+  _advanceCard() {
+    const g = store.get().game;
+    const order   = g.revealOrder || [];
+    const cardIdx = (typeof g.voteCardIndex === 'number' ? g.voteCardIndex : 0);
+    const nextIdx = cardIdx + 1;
+    if (nextIdx >= order.length) {
+      // All cards done — resolve
+      this._resolveVoteReveal();
+      return;
+    }
+    store.patchGame({ voteCardIndex: nextIdx, cardConfirmed: {}, timeLeft: g.voteTime });
+    this.broadcast();
+    this._startTimer(g.voteTime, () => this._cardTimerExpired());
+  }
+
+  _bonusVote(pid, targetPid) {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'vote_reveal') return;
+    const bonusVotes = Object.assign({}, g.bonusVotes);
+    if (bonusVotes[pid] === targetPid) delete bonusVotes[pid]; // toggle cancel
+    else bonusVotes[pid] = targetPid;
+    store.patchGame({ bonusVotes }); this.broadcast();
+  }
+
+  _react(pid, emoji) {
+    const g = store.get().game;
+    if (!['vote_reveal','round_result'].includes(g.chaosPhase)) return;
+    const allowed = ['😂','🔥','💀','👏','😮','🤣','👎','💯'];
+    if (!allowed.includes(emoji)) return;
+
+    // If same emoji is already active, clear first then re-fire (creates new float)
+    const cur0 = (g.reactions || {})[pid];
+    const doFire = () => {
+      const reactions = Object.assign({}, store.get().game.reactions, { [pid]: emoji });
+      store.patchGame({ reactions }); this.broadcast();
+      this._scheduleReactClear(pid, emoji);
+    };
+    if (cur0 === emoji) {
+      // Clear existing, then re-fire on next tick so the float animation restarts
+      const r0 = Object.assign({}, g.reactions); delete r0[pid];
+      store.patchGame({ reactions: r0 }); this.broadcast();
+      setTimeout(doFire, 50);
+    } else {
+      doFire();
+    }
+  }
+
+  _scheduleReactClear(pid, emoji) {
+    setTimeout(() => {
+      const cur = store.get().game.reactions || {};
+      if (cur[pid] === emoji) {
+        const r2 = Object.assign({}, cur); delete r2[pid];
+        store.patchGame({ reactions: r2 }); this.broadcast();
+      }
+    }, 3000);
+  }
+
+  _resolveVoteReveal() {
+    const g = store.get().game; const pids = this._activePids();
+    const votes = g.votes || {}, bonusVotes = g.bonusVotes || {};
+    const roundScores = {}, bonusScores = {};
+    const newGreat = Object.assign({}, g.greatCounts), newViol = Object.assign({}, g.violationCounts);
+    pids.forEach(p => { roundScores[p] = 0; bonusScores[p] = 0; });
+    pids.forEach(editorPid => {
+      pids.forEach(voterPid => {
+        if (voterPid === editorPid) return;
+        const r = (votes[voterPid] || {})[editorPid]; if (!r) return;
+        roundScores[editorPid] += CHAOS_SCORE[r] || 0;
+        if (r === 'great')     newGreat[editorPid] = (newGreat[editorPid] || 0) + 1;
+        if (r === 'violation') newViol[editorPid]  = (newViol[editorPid]  || 0) + 1;
+      });
+    });
+    Object.values(bonusVotes).forEach(t => { if (bonusScores[t] !== undefined) bonusScores[t]++; });
+    const newScores = Object.assign({}, g.scores);
+    pids.forEach(p => { newScores[p] = (newScores[p] || 0) + roundScores[p]; });
+    store.patchGame({ chaosPhase: 'round_result', roundScores, scores: newScores, bonusScores, greatCounts: newGreat, violationCounts: newViol });
+    this.broadcast();
+  }
+
+  // ── round_result / end ────────────────────────────────
+
+  _hostNextRound() {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'round_result') return;
+    if (g.chaosRound >= g.totalRounds) {
+      store.patchGame({ chaosPhase: 'end', endRevealStep: 0 }); this.broadcast(); return;
+    }
+    store.patchGame({
+      chaosPhase: 'write_sentence', chaosRound: g.chaosRound + 1,
+      sentences: {}, rules: {}, selectedRule: '', selectedRuleAuthor: null,
+      assignments: {}, modifications: {}, revealOrder: [], voteCardIndex: 0,
+      votes: {}, cardConfirmed: {}, bonusVotes: {}, roundScores: {}, reactions: {},
+      timeLeft: g.writeTime,
+    });
+    this.broadcast();
+    this._startTimer(g.writeTime, () => this._resolveWriteSentence());
+  }
+
+  _endRevealNext() {
+    const g = store.get().game;
+    if (g.chaosPhase !== 'end') return;
+    store.patchGame({ endRevealStep: Math.min((g.endRevealStep || 0) + 1, 2) });
+    this.broadcast();
+  }
+
+  _returnLobby() { store.replaceGame(makeGame()); this.broadcast(); bus.emit(EVT.RETURN_LOBBY); }
+
+  // ── Helpers ───────────────────────────────────────────
+
+  _activePids() { return Object.keys(store.get().players).filter(id => !store.get().players[id].isSpectator); }
+
+  _derange(arr) {
+    if (arr.length <= 1) return arr.slice();
+    let r, tries = 0;
+    do { r = Utils.shuffle(arr.slice()); tries++; } while (r.some((v, i) => v === arr[i]) && tries < 200);
+    return r;
+  }
+
+  _startTimer(seconds, onExpire) {
+    this.stopTimer();
+    let t = seconds;
+    this._timer = setInterval(() => {
+      t = Math.max(0, t - 1); store.patchGame({ timeLeft: t }); this.broadcast();
+      if (t <= 0) { this.stopTimer(); onExpire(); }
+    }, 1000);
+  }
+
+  stopTimer() { clearInterval(this._timer); this._timer = null; }
+
+  broadcast() { const { isHost, game, roomCode } = store.get(); if (!isHost) return; transport.pushGameState(roomCode, game); }
+
+  sendAction(action) {
+    const { isHost, myId, roomCode } = store.get();
+    if (isHost) bus.emit(EVT.ACTION_RECEIVED, { action: Object.assign({}, action, { playerId: myId }) });
+    else transport.pushAction(roomCode, Object.assign({}, action, { playerId: myId }));
+  }
+}
+
+
+const wwEngine    = new WerewolfEngine();
+const chaosEngine = new ChaosEngine();
 
 // ═══════════════════════════════════════════════════════════════════════
 // LAYER 11 ─ UI Controller
@@ -1637,9 +2118,7 @@ class UIController {
       if (!state) return;
 
       if (state.gameType === 'werewolf') {
-        // Navigate if needed, then always render WW with the incoming state
         if (this._screen !== 'ww-game') {
-          // Switch screen first (does a _sync but store may not have new state yet)
           document.querySelectorAll('.screen').forEach(el => {
             el.classList.add('hidden'); el.classList.remove('active');
           });
@@ -1647,13 +2126,25 @@ class UIController {
           if (el) { el.classList.remove('hidden'); el.classList.add('active'); }
           this._screen = 'ww-game';
         }
-        // Always render with the INCOMING state (most up-to-date)
         this._renderWW(Object.assign({}, store.get(), { game: state }));
         return;
       }
 
-      // WW game ended / returned to lobby — clear spectator flag for this client
-      if (this._screen === 'ww-game') {
+      if (state.gameType === 'chaos') {
+        if (this._screen !== 'chaos-game') {
+          document.querySelectorAll('.screen').forEach(el => {
+            el.classList.add('hidden'); el.classList.remove('active');
+          });
+          const el = document.getElementById('screen-chaos-game');
+          if (el) { el.classList.remove('hidden'); el.classList.add('active'); }
+          this._screen = 'chaos-game';
+        }
+        this._renderChaos(Object.assign({}, store.get(), { game: state }));
+        return;
+      }
+
+      // WW / chaos game ended / returned to lobby
+      if (this._screen === 'ww-game' || this._screen === 'chaos-game') {
         const { myId, roomCode, isSpectator: wasSpec } = store.get();
         if (wasSpec) {
           store.set({ isSpectator: false });
@@ -1677,6 +2168,7 @@ class UIController {
     this._bindRoom();
     this._bindGame();
     this._bindWWGame();
+    this._bindChaosGame();
     this.show('home');
   }
 
@@ -1733,6 +2225,11 @@ class UIController {
       if (!g || g.gameType !== 'werewolf') return;
       // Only host-side updates come through _sync; non-host updates come through GAME_STATE_UPDATED
       if (s.isHost) this._renderWW(s);
+    }
+    if (this._screen === 'chaos-game') {
+      const g = s.game;
+      if (!g || g.gameType !== 'chaos') return;
+      if (s.isHost) this._renderChaos(s);
     }
   }
 
@@ -1800,6 +2297,7 @@ class UIController {
 
       this._show('story-settings', gameType === 'story');
       this._show('ww-settings',    gameType === 'werewolf');
+      this._show('chaos-settings', gameType === 'chaos');
 
       if (gameType === 'story') {
         document.querySelectorAll('input[name="game-mode"]').forEach(r => { r.checked = r.value === mode; });
@@ -1833,6 +2331,13 @@ class UIController {
       lines = '<div class="spec-lobby-row"><span>📖 故事接龍</span></div>' +
         '<div class="spec-lobby-row"><span class="slr-label">計時方式</span><span>' + (mode==='time'?'計時制':'回合制') + '</span></div>' +
         '<div class="spec-lobby-row"><span class="slr-label">回合數</span><span>' + rounds + ' 回合</span></div>';
+    } else if (gameType === 'chaos') {
+      var cc = settings.chaosConfig || {};
+      lines = '<div class="spec-lobby-row"><span>🎲 規則混亂</span></div>' +
+        '<div class="spec-lobby-row"><span class="slr-label">回合數</span><span>' + (cc.totalRounds||5) + ' 回合</span></div>' +
+        '<div class="spec-lobby-row"><span class="slr-label">寫句子</span><span>' + (cc.writeTime||60) + ' 秒</span></div>' +
+        '<div class="spec-lobby-row"><span class="slr-label">修改</span><span>' + (cc.modifyTime||60) + ' 秒</span></div>' +
+        '<div class="spec-lobby-row"><span class="slr-label">每張投票</span><span>' + (cc.voteTime||20) + ' 秒</span></div>';
     } else {
       var wwCfg = settings.wwConfig || {};
       var roles = wwCfg.roles || {};
@@ -1858,6 +2363,14 @@ class UIController {
         '<div class="preview-row"><span class="preview-label">遊戲模式</span><span class="preview-val">📖 故事接龍</span></div>' +
         '<div class="preview-row"><span class="preview-label">計時方式</span><span class="preview-val">' + (mode==='time'?'計時制（'+turnTime+'秒/輪）':'回合制（全員鎖定換輪）') + '</span></div>' +
         '<div class="preview-row"><span class="preview-label">回合數</span><span class="preview-val">' + rounds + ' 回合</span></div>';
+    } else if (gameType === 'chaos') {
+      const cc = settings.chaosConfig || {};
+      cont.innerHTML =
+        '<div class="preview-row"><span class="preview-label">遊戲模式</span><span class="preview-val">🎲 規則混亂</span></div>' +
+        '<div class="preview-row"><span class="preview-label">回合數</span><span class="preview-val">' + (cc.totalRounds||5) + ' 回合</span></div>' +
+        '<div class="preview-row"><span class="preview-label">寫句子時限</span><span class="preview-val">' + (cc.writeTime||60) + ' 秒</span></div>' +
+        '<div class="preview-row"><span class="preview-label">修改時限</span><span class="preview-val">' + (cc.modifyTime||60) + ' 秒</span></div>' +
+        '<div class="preview-row"><span class="preview-label">每張投票時限</span><span class="preview-val">' + (cc.voteTime||20) + ' 秒</span></div>';
     } else {
       const wwCfg = settings.wwConfig || {};
       const roles  = wwCfg.roles || {};
@@ -1989,8 +2502,8 @@ class UIController {
       }
     }
 
-    // Auto-lock when time is almost up (prevents blank story segments)
-    if (game.mode === 'time' && (game.timeLeft <= 3) && game.timeLeft > 0 && !isLocked) {
+    // Auto-lock at last second (timeLeft===1 avoids race with host phase transition at 0)
+    if (game.mode === 'time' && game.timeLeft === 1 && !isLocked) {
       if (this._autoLockTurn !== game.currentTurn) {
         this._autoLockTurn = game.currentTurn;
         var txt = (inp ? inp.value.trim() : '') || '（略過）';
@@ -2098,7 +2611,9 @@ class UIController {
 
   _bindHome() {
     var self = this;
-    var go   = async function(join) {
+    var _busy = false;  // prevent double-submit
+    var go = async function(join) {
+      if (_busy) return;
       var name = (document.getElementById('input-name') || {}).value;
       name = name ? name.trim() : '';
       if (!name) return self._err('home-error', '請先輸入暱稱');
@@ -2106,11 +2621,17 @@ class UIController {
         var code = (document.getElementById('input-room-code') || {}).value;
         code = code ? code.trim() : '';
         if (!code) return self._err('home-error', '請輸入房間代碼');
-        try   { self.overlay('加入房間中…'); await roomManager.joinRoom(code, name); self.hideOverlay(); }
-        catch (e) { self.hideOverlay(); self._err('home-error', '加入失敗：' + e.message); }
-      } else {
-        try   { self.overlay('建立房間中…'); await roomManager.createRoom(name); self.hideOverlay(); }
-        catch (e) { self.hideOverlay(); self._err('home-error', '建立失敗：' + e.message); }
+      }
+      _busy = true;
+      self._setHomeBusy(true, join ? '加入中…' : '建立中…');
+      try {
+        if (join) { await roomManager.joinRoom(code, name); }
+        else       { await roomManager.createRoom(name); }
+      } catch (e) {
+        self._err('home-error', (join ? '加入失敗：' : '建立失敗：') + e.message);
+      } finally {
+        _busy = false;
+        self._setHomeBusy(false, '');
       }
     };
     this._on('btn-create-room', 'click', function() { go(false); });
@@ -2124,16 +2645,48 @@ class UIController {
     });
   }
 
+  _setHomeBusy(busy, msg) {
+    var createBtn = document.getElementById('btn-create-room');
+    var joinBtn   = document.getElementById('btn-join-room');
+    var nameInp   = document.getElementById('input-name');
+    var codeInp   = document.getElementById('input-room-code');
+    var loading   = document.getElementById('home-loading-bar');
+
+    if (createBtn) createBtn.disabled = busy;
+    if (joinBtn)   joinBtn.disabled   = busy;
+    if (nameInp)   nameInp.disabled   = busy;
+    if (codeInp)   codeInp.disabled   = busy;
+    if (loading) {
+      loading.classList.toggle('hidden', !busy);
+      var loadTxt = loading.querySelector('.home-loading-txt');
+      if (loadTxt) loadTxt.textContent = msg;
+    }
+  }
+
   _bindRoom() {
     var self = this;
     this._on('btn-copy-code', 'click', function() {
       var code = (document.getElementById('display-room-code') || {}).textContent || '';
+      var btn  = document.getElementById('btn-copy-code');
+      var doFeedback = function(ok) {
+        if (!btn) return;
+        btn.classList.add('btn-copying');
+        setTimeout(function() {
+          btn.classList.remove('btn-copying');
+          btn.classList.add(ok ? 'btn-copied-ok' : 'btn-copied-fail');
+          setTimeout(function() { btn.classList.remove('btn-copied-ok','btn-copied-fail'); }, 1200);
+        }, 120);
+      };
       if (navigator.clipboard) {
         navigator.clipboard.writeText(code)
-          .then(function() { self.toast('房間代碼已複製！', 'success'); })
-          .catch(function() { self.toast('代碼：' + code, 'info'); });
+          .then(function() { doFeedback(true); self.toast('房間代碼已複製！', 'success'); })
+          .catch(function() { doFeedback(false); self.toast('代碼：' + code, 'info'); });
       } else {
-        self.toast('代碼：' + code, 'info');
+        try {
+          var ta = document.createElement('textarea');
+          ta.value = code; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+          doFeedback(true); self.toast('房間代碼已複製！', 'success');
+        } catch(_) { doFeedback(false); self.toast('代碼：' + code, 'info'); }
       }
     });
 
@@ -2195,9 +2748,6 @@ class UIController {
 
     // ── Werewolf: start game ────────────────────────────
     this._on('btn-start-ww', 'click', function() {
-      alert('因檢測到狼人殺遊戲中有重大bug，故暫時關閉該功能');
-      return;
-      
       var players    = store.get().players;
       var activePlayers = Object.values(players).filter(function(p) { return !p.isSpectator; });
       var n          = activePlayers.length;
@@ -2275,6 +2825,24 @@ class UIController {
       transport.pushSettings(store.get().roomCode, ns);
     });
 
+    // Push chaos settings on change — so non-host preview stays in sync
+    function pushChaos() {
+      var s  = store.get().settings;
+      var cc = Object.assign({}, s.chaosConfig || {}, {
+        totalRounds : Utils.clamp(parseInt((document.getElementById('chaos-rounds')||{}).value||5),2,15),
+        writeTime   : Utils.clamp(parseInt((document.getElementById('chaos-write-time')||{}).value||60),20,180),
+        modifyTime  : Utils.clamp(parseInt((document.getElementById('chaos-modify-time')||{}).value||60),20,180),
+        voteTime    : Utils.clamp(parseInt((document.getElementById('chaos-vote-time')||{}).value||20),10,60),
+      });
+      var ns = Object.assign({}, s, { chaosConfig: cc });
+      store.set({ settings: ns });
+      transport.pushSettings(store.get().roomCode, ns);
+    }
+    ['chaos-rounds','chaos-write-time','chaos-modify-time','chaos-vote-time'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener('change', pushChaos);
+    });
+
     // Max players selector
     var mpSel = document.getElementById('select-max-players');
     if (mpSel) mpSel.addEventListener('change', function() {
@@ -2309,6 +2877,31 @@ class UIController {
         self._renderPlayers(store.get().players, s.myId, s.hostId);
         self._renderRoomControls(store.get());
       });
+    });
+
+    // ── Chaos: start game ───────────────────────────────
+    this._on('btn-start-chaos', 'click', function() {
+      var players      = store.get().players;
+      var activePlayers = Object.values(players).filter(function(p) { return !p.isSpectator; });
+      if (activePlayers.length < 3)
+        return self._err('room-error', '規則混亂至少需要 3 名玩家');
+      var s   = store.get().settings;
+      var cc  = s.chaosConfig || {};
+      var totalRounds = Utils.clamp(parseInt((document.getElementById('chaos-rounds') || {}).value || 5), 2, 15);
+      var writeTime   = Utils.clamp(parseInt((document.getElementById('chaos-write-time') || {}).value || 60), 20, 180);
+      var modifyTime  = Utils.clamp(parseInt((document.getElementById('chaos-modify-time') || {}).value || 60), 20, 180);
+      var voteTime    = Utils.clamp(parseInt((document.getElementById('chaos-vote-time') || {}).value || 30), 10, 90);
+      var newSettings = Object.assign({}, s, { chaosConfig: { totalRounds, writeTime, modifyTime, voteTime } });
+      store.set({ settings: newSettings });
+      transport.pushSettings(store.get().roomCode, newSettings);
+      chaosEngine.startGame({ totalRounds, writeTime, modifyTime, voteTime });
+      document.querySelectorAll('.screen').forEach(function(el) {
+        el.classList.add('hidden'); el.classList.remove('active');
+      });
+      var scrEl = document.getElementById('screen-chaos-game');
+      if (scrEl) { scrEl.classList.remove('hidden'); scrEl.classList.add('active'); }
+      self._screen = 'chaos-game';
+      self._renderChaos(store.get());
     });
   }
 
@@ -2491,6 +3084,456 @@ class UIController {
     }
   }
 
+  // ── Chaos Game Bindings ───────────────────────────────
+
+  _bindChaosGame() {
+    var self = this;
+
+    // write_sentence
+    var sInp = document.getElementById('chaos-sentence-input');
+    this._on('btn-chaos-submit-sentence', 'click', function() {
+      var t = (sInp||{}).value||''; if (!t.trim()) return self.toast('請先輸入句子','warn');
+      chaosEngine.sendAction({ type: CHAOS_ACTION.SUBMIT_SENTENCE, text: t.trim() });
+    });
+    this._on('btn-chaos-unsubmit-sentence', 'click', function() { chaosEngine.sendAction({ type: CHAOS_ACTION.UNSUBMIT_SENTENCE }); });
+    if (sInp) sInp.addEventListener('keydown', function(e){ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault(); document.getElementById('btn-chaos-submit-sentence').click();} });
+
+    // write_rule
+    var rInp = document.getElementById('chaos-rule-input');
+    this._on('btn-chaos-submit-rule', 'click', function() {
+      var t = (rInp||{}).value||''; if (!t.trim()) return self.toast('請先輸入規則','warn');
+      chaosEngine.sendAction({ type: CHAOS_ACTION.SUBMIT_RULE, text: t.trim() });
+    });
+    this._on('btn-chaos-unsubmit-rule', 'click', function() { chaosEngine.sendAction({ type: CHAOS_ACTION.UNSUBMIT_RULE }); });
+    if (rInp) rInp.addEventListener('keydown', function(e){ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault(); document.getElementById('btn-chaos-submit-rule').click();} });
+
+    // modify
+    var mInp = document.getElementById('chaos-modify-input');
+    this._on('btn-chaos-submit-modify', 'click', function() {
+      var t = (mInp||{}).value||''; if (!t.trim()) return self.toast('請先輸入修改結果','warn');
+      chaosEngine.sendAction({ type: CHAOS_ACTION.SUBMIT_MODIFY, text: t.trim() });
+    });
+    this._on('btn-chaos-unsubmit-modify', 'click', function() { chaosEngine.sendAction({ type: CHAOS_ACTION.UNSUBMIT_MODIFY }); });
+    if (mInp) mInp.addEventListener('keydown', function(e){ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault(); document.getElementById('btn-chaos-submit-modify').click();} });
+
+    // vote_reveal: vote + confirm + bonus + reactions — all via event delegation
+    document.addEventListener('click', function(e) {
+      var rb = e.target.closest('[data-chaos-rate]');
+      if (rb) { chaosEngine.sendAction({ type: CHAOS_ACTION.VOTE_CARD, rating: rb.getAttribute('data-rating') }); return; }
+      var bb = e.target.closest('[data-chaos-bonus]');
+      if (bb) { chaosEngine.sendAction({ type: CHAOS_ACTION.BONUS_VOTE, targetPid: bb.getAttribute('data-target') }); return; }
+      var em = e.target.closest('[data-chaos-react]');
+      if (em) { chaosEngine.sendAction({ type: CHAOS_ACTION.REACT, emoji: em.getAttribute('data-emoji') }); return; }
+      // Confirm card — dynamic button, must use delegation
+      if (e.target && (e.target.id === 'btn-chaos-confirm-card' || e.target.closest('#btn-chaos-confirm-card'))) {
+        chaosEngine.sendAction({ type: CHAOS_ACTION.CONFIRM_CARD }); return;
+      }
+    });
+
+    // navigation
+    this._on('btn-chaos-next-round',  'click', function() { chaosEngine.sendAction({ type: CHAOS_ACTION.HOST_NEXT_ROUND }); });
+    this._on('btn-chaos-end-reveal',  'click', function() { chaosEngine.sendAction({ type: CHAOS_ACTION.END_REVEAL_NEXT }); });
+    this._on('btn-chaos-back-lobby',  'click', function() { chaosEngine.sendAction({ type: CHAOS_ACTION.RETURN_LOBBY }); });
+  }
+
+  // ── Chaos Rendering ───────────────────────────────────
+
+  _renderChaos(s) {
+    var g = s.game, players = s.players, myId = s.myId, isHost = s.isHost, isSpectator = s.isSpectator;
+    if (!g || g.gameType !== 'chaos') return;
+    var phase = g.chaosPhase;
+
+    // Auto-submit at last second (timeLeft===1) — avoids race with host phase transition at 0
+    if (g.timeLeft === 1) {
+      if (phase === 'write_sentence' && !(g.sentences||{})[myId]) {
+        var si = document.getElementById('chaos-sentence-input');
+        var st = si ? si.value.trim() : '';
+        chaosEngine.sendAction({ type: CHAOS_ACTION.SUBMIT_SENTENCE, text: st || '（時間到）' });
+      } else if (phase === 'write_rule' && !(g.rules||{})[myId]) {
+        var ri = document.getElementById('chaos-rule-input');
+        var rt = ri ? ri.value.trim() : '';
+        chaosEngine.sendAction({ type: CHAOS_ACTION.SUBMIT_RULE, text: rt || '句子要很有趣' });
+      } else if (phase === 'modify' && !(g.modifications||{})[myId]) {
+        var mi = document.getElementById('chaos-modify-input');
+        var mt = mi ? mi.value.trim() : '';
+        chaosEngine.sendAction({ type: CHAOS_ACTION.SUBMIT_MODIFY, text: mt || '（時間到）' });
+      }
+    }
+
+    var specOv = document.getElementById('chaos-spectator-overlay');
+    if (specOv) specOv.classList.toggle('hidden', !isSpectator);
+    if (isSpectator) { this._renderChaosSpectator(g, players); return; }
+
+    var pn = { write_sentence:'✏️ 寫初始句子', write_rule:'📜 制定規則', rule_reveal:'🎲 規則揭曉！', modify:'🔧 修改句子', vote_reveal:'🃏 揭牌評分', round_result:'📊 回合結果', end:'🏆 遊戲結束' };
+    var hdr = document.getElementById('chaos-header-info');
+    if (hdr) hdr.textContent = '第 ' + g.chaosRound + ' / ' + g.totalRounds + ' 回合　' + (pn[phase]||'');
+
+    var timerEl = document.getElementById('chaos-timer-val'), timerWrap = document.getElementById('chaos-timer-wrap');
+    var showTimer = ['write_sentence','write_rule','modify','vote_reveal','rule_reveal'].includes(phase);
+    if (timerWrap) timerWrap.classList.toggle('hidden', !showTimer);
+    if (timerEl && showTimer) timerEl.textContent = g.timeLeft || 0;
+
+    ['write-sentence','write-rule','rule-reveal','modify','vote-reveal','round-result','end'].forEach(function(p) {
+      var el = document.getElementById('chaos-panel-' + p); if (el) el.classList.add('hidden');
+    });
+
+    if (phase === 'write_sentence') this._renderChaosWriteSentence(g, myId, players);
+    if (phase === 'write_rule')     this._renderChaosWriteRule(g, myId, players);
+    if (phase === 'rule_reveal')    this._renderChaosRuleReveal(g, players);
+    if (phase === 'modify')         this._renderChaosModify(g, myId, players);
+    if (phase === 'vote_reveal')    this._renderChaosVoteReveal(g, myId, players, isHost);
+    if (phase === 'round_result')   this._renderChaosRoundResult(g, players, isHost);
+    if (phase === 'end')            this._renderChaosEnd(g, players, isHost);
+  }
+
+  _showChaosPanel(id) { var el = document.getElementById('chaos-panel-' + id); if (el) el.classList.remove('hidden'); }
+
+  _chaosInputReset(inputId, round) {
+    var inp = document.getElementById(inputId);
+    if (inp && inp.getAttribute('data-round') !== String(round)) {
+      inp.value = ''; inp.setAttribute('data-round', round);
+    }
+  }
+
+  _renderChaosWriteSentence(g, myId, players) {
+    this._showChaosPanel('write-sentence');
+    var submitted = !!(g.sentences||{})[myId];
+    if (!submitted) this._chaosInputReset('chaos-sentence-input', g.chaosRound);
+    var inp = document.getElementById('chaos-sentence-input'); if (inp) inp.disabled = submitted;
+    var btn = document.getElementById('btn-chaos-submit-sentence');
+    if (btn) { btn.disabled = submitted; btn.textContent = submitted ? '✓ 已提交，等待其他人…' : '✦ 提交句子'; }
+    var unBtn = document.getElementById('btn-chaos-unsubmit-sentence'); if (unBtn) unBtn.classList.toggle('hidden', !submitted);
+    var pids = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
+    var prog = document.getElementById('chaos-sentence-progress');
+    if (prog) prog.textContent = pids.filter(function(p){return !!(g.sentences||{})[p];}).length + ' / ' + pids.length + ' 人已提交';
+  }
+
+  _renderChaosWriteRule(g, myId, players) {
+    this._showChaosPanel('write-rule');
+    var submitted = !!(g.rules||{})[myId];
+    if (!submitted) this._chaosInputReset('chaos-rule-input', g.chaosRound);
+    var myS = document.getElementById('chaos-your-sentence'); if (myS) myS.textContent = (g.sentences||{})[myId] || '';
+    var inp = document.getElementById('chaos-rule-input'); if (inp) inp.disabled = submitted;
+    var btn = document.getElementById('btn-chaos-submit-rule');
+    if (btn) { btn.disabled = submitted; btn.textContent = submitted ? '✓ 已提交，等待其他人…' : '✦ 提交規則'; }
+    var unBtn = document.getElementById('btn-chaos-unsubmit-rule'); if (unBtn) unBtn.classList.toggle('hidden', !submitted);
+    var pids = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
+    var prog = document.getElementById('chaos-rule-progress');
+    if (prog) prog.textContent = pids.filter(function(p){return !!(g.rules||{})[p];}).length + ' / ' + pids.length + ' 人已提交';
+  }
+
+  _renderChaosRuleReveal(g, players) {
+    this._showChaosPanel('rule-reveal');
+    var el = document.getElementById('chaos-rule-text'); if (el) el.textContent = g.selectedRule || '';
+    var auth = g.selectedRuleAuthor ? ((players[g.selectedRuleAuthor]||{}).name||'???') : '隨機';
+    var tl   = (g.timeLeft != null && g.timeLeft > 0) ? g.timeLeft : '';
+    var au = document.getElementById('chaos-rule-author');
+    if (au) au.textContent = '規則由 ' + auth + ' 制定' + (tl !== '' ? ' · ' + tl + ' 秒後開始修改…' : ' · 即將開始修改…');
+    // Timer for rule_reveal
+    var timerWrap = document.getElementById('chaos-timer-wrap');
+    var timerEl   = document.getElementById('chaos-timer-val');
+    if (timerWrap) timerWrap.classList.toggle('hidden', !tl);
+    if (timerEl && tl)   timerEl.textContent = tl;
+  }
+
+  _renderChaosModify(g, myId, players) {
+    this._showChaosPanel('modify');
+    var rEl = document.getElementById('chaos-modify-rule'); if (rEl) rEl.textContent = g.selectedRule || '';
+    var origPid = (g.assignments||{})[myId];
+    var oEl = document.getElementById('chaos-modify-original'); if (oEl) oEl.textContent = origPid ? ((g.sentences||{})[origPid]||'') : '（無）';
+    var submitted = !!(g.modifications||{})[myId];
+    if (!submitted) this._chaosInputReset('chaos-modify-input', g.chaosRound);
+    var inp = document.getElementById('chaos-modify-input'); if (inp) inp.disabled = submitted;
+    var btn = document.getElementById('btn-chaos-submit-modify');
+    if (btn) { btn.disabled = submitted; btn.textContent = submitted ? '✓ 已提交，等待其他人…' : '✦ 提交修改結果'; }
+    var unBtn = document.getElementById('btn-chaos-unsubmit-modify'); if (unBtn) unBtn.classList.toggle('hidden', !submitted);
+    var pids = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
+    var prog = document.getElementById('chaos-modify-progress');
+    if (prog) prog.textContent = pids.filter(function(p){return !!(g.modifications||{})[p];}).length + ' / ' + pids.length + ' 人已完成';
+  }
+
+  // ── vote_reveal: FULL SCREEN single card ──────────────
+  _renderChaosVoteReveal(g, myId, players, isHost) {
+    this._showChaosPanel('vote-reveal');
+    var order    = Array.isArray(g.revealOrder) ? g.revealOrder : [];
+    var cardIdx  = typeof g.voteCardIndex === 'number' ? g.voteCardIndex : 0;
+    var total    = order.length;
+    var editorPid  = order[cardIdx] || null;
+    var assignments  = g.assignments  || {};
+    var sentences    = g.sentences    || {};
+    var modifications= g.modifications|| {};
+    var myVoteForCard= editorPid ? ((g.votes||{})[myId]||{})[editorPid] : null;
+    var myConfirmed  = !!(g.cardConfirmed||{})[myId];
+    var pids         = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
+    var confirmedCount = pids.filter(function(p){return !!(g.cardConfirmed||{})[p];}).length;
+    var reactions    = g.reactions || {};
+    var myReact      = reactions[myId] || '';
+    var myBonus      = (g.bonusVotes||{})[myId];
+    var isSelf       = editorPid === myId;
+    var canConfirm   = !myConfirmed && (isSelf || !!myVoteForCard);
+
+    // Always update header (no animation)
+    var ctr = document.getElementById('chaos-vote-card-counter');
+    if (ctr) ctr.textContent = (cardIdx + 1) + ' / ' + total;
+    var rEl = document.getElementById('chaos-vr-rule');
+    if (rEl) rEl.textContent = g.selectedRule || '';
+
+    var grid = document.getElementById('chaos-vr-grid'); if (!grid) return;
+
+    // ── Card change: full rebuild WITH entry animation ──
+    if (!editorPid) {
+      grid.innerHTML = '<div class="chaos-reveal-waiting"><p>準備揭牌…</p></div>';
+      grid.setAttribute('data-card', '-1'); return;
+    }
+
+    var isNewCard = grid.getAttribute('data-card') !== String(cardIdx);
+
+    if (isNewCard) {
+      grid.setAttribute('data-card', String(cardIdx));
+      var origPid  = assignments[editorPid];
+      var editor   = players[editorPid] || {};
+      var origAuth = players[origPid]   || {};
+      var orig     = sentences[origPid]     || '（未輸入）';
+      var mod      = modifications[editorPid] || '（未修改）';
+      var editorName = (myConfirmed || isSelf) ? Utils.escapeHtml(editor.name||'???') : '🎭 神秘改寫者';
+
+      grid.innerHTML =
+        '<div class="chaos-vote-card-full">' +
+          '<div class="chaos-card-original"><span class="chaos-card-label">原句（' + Utils.escapeHtml((origAuth.name||'???')) + ' 所寫）</span>' +
+            '<div class="chaos-card-text chaos-orig-big">' + Utils.escapeHtml(orig) + '</div></div>' +
+          '<div class="chaos-card-arrow-big">↓</div>' +
+          '<div class="chaos-card-modified"><span class="chaos-card-label">修改（<span id="cvr-editor-name">' + editorName + '</span>）</span>' +
+            '<div class="chaos-card-text chaos-mod-big">' + Utils.escapeHtml(mod) + '</div></div>' +
+          '<div id="cvr-rating-row" class="chaos-card-rating-row"></div>' +
+          '<div id="cvr-bonus-wrap"></div>' +
+        '</div>';
+
+      grid.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+      // Reset persistent elements for new card
+      var confirmWrapNew = document.getElementById('cvr-confirm-wrap');
+      if (confirmWrapNew) { confirmWrapNew.innerHTML = ''; confirmWrapNew._patchedConfirmed = false; }
+      var ratingRowNew = document.getElementById('cvr-rating-row');
+      if (ratingRowNew) { ratingRowNew._patchedVoted = false; }
+
+      // Trigger entry animation exactly once
+      var cardFull = grid.querySelector('.chaos-vote-card-full');
+      if (cardFull) {
+        cardFull.classList.add('card-enter');
+        setTimeout(function() { if (cardFull) cardFull.classList.remove('card-enter'); }, 500);
+      }
+    }
+
+    // ── Patch dynamic parts without rebuilding card ──
+
+    // Editor name (revealed after confirm)
+    var nameEl = document.getElementById('cvr-editor-name');
+    if (nameEl) {
+      var origPid2 = assignments[editorPid];
+      var editor2  = players[editorPid] || {};
+      var newName  = (myConfirmed || isSelf) ? Utils.escapeHtml(editor2.name||'???') : '🎭 神秘改寫者';
+      if (nameEl.textContent !== newName) nameEl.textContent = newName;
+    }
+
+    // Rating row
+    var ratingRow = document.getElementById('cvr-rating-row');
+    if (ratingRow) {
+      if (!isSelf && !myConfirmed) {
+        var ratings = [
+          {val:'violation',label:'❌ 違規 −2',cls:'vote-violation'},
+          {val:'normal',   label:'👍 普通 +1',cls:'vote-normal'},
+          {val:'great',    label:'⭐ 超棒 +4',cls:'vote-great'},
+        ];
+        var newRatingHtml = ratings.map(function(r) {
+          return '<button class="chaos-rating-big ' + r.cls + (myVoteForCard===r.val?' selected':'') + '" data-chaos-rate="1" data-rating="' + r.val + '">' + r.label + '</button>';
+        }).join('');
+        // Only patch if selection changed (avoids flicker from full rebuild)
+        var curSelected = ratingRow.querySelector('.selected');
+        var curVal = curSelected ? curSelected.getAttribute('data-rating') : null;
+        if (curVal !== (myVoteForCard||null) || ratingRow.children.length !== 3) {
+          ratingRow.innerHTML = newRatingHtml;
+        }
+      } else {
+        var rLabel = {violation:'❌ 違規', normal:'👍 普通', great:'⭐ 超棒'};
+        var voteText = myVoteForCard ? rLabel[myVoteForCard] : isSelf ? '（自己）' : '—';
+        if (!ratingRow._patchedVoted) {
+          ratingRow.innerHTML = '<div class="chaos-voted-label">你的評分：' + voteText + '</div>';
+          ratingRow._patchedVoted = true;
+        }
+      }
+    }
+
+    // Bonus button
+    var bonusWrap = document.getElementById('cvr-bonus-wrap');
+    if (bonusWrap && !isSelf) {
+      var bonusSel = myBonus === editorPid;
+      var newBonusTxt = '💫 ' + (bonusSel ? '已選最喜歡 ✓' : '選為最喜歡');
+      var existingBonus = bonusWrap.querySelector('.chaos-bonus-btn');
+      if (!existingBonus) {
+        bonusWrap.innerHTML = '<button class="chaos-bonus-btn' + (bonusSel?' selected':'') + '" data-chaos-bonus="1" data-target="' + editorPid + '">' + newBonusTxt + '</button>';
+      } else {
+        var needsSel = bonusSel !== existingBonus.classList.contains('selected');
+        if (needsSel || existingBonus.textContent !== newBonusTxt) {
+          existingBonus.className = 'chaos-bonus-btn' + (bonusSel?' selected':'');
+          existingBonus.textContent = newBonusTxt;
+        }
+      }
+    }
+
+    // Confirm / confirmed label — persistent element in HTML
+    var confirmWrap = document.getElementById('cvr-confirm-wrap');
+    if (confirmWrap) {
+      if (!myConfirmed) {
+        var existingBtn = document.getElementById('btn-chaos-confirm-card');
+        if (!existingBtn) {
+          confirmWrap.innerHTML = '<button id="btn-chaos-confirm-card" class="btn btn-primary btn-full' + (canConfirm ? '' : ' hidden') + '">✓ 確認此張評分</button>';
+        } else {
+          existingBtn.classList.toggle('hidden', !canConfirm);
+        }
+      } else {
+        if (!confirmWrap._patchedConfirmed) {
+          confirmWrap.innerHTML = '<div class="chaos-confirmed-label">✓ 已確認，等待其他人…</div>';
+          confirmWrap._patchedConfirmed = true;
+        }
+      }
+    }
+
+    // Confirmed count — persistent element
+    var progEl = document.getElementById('cvr-progress');
+    var progTxt = confirmedCount + ' / ' + pids.length + ' 人已確認';
+    if (progEl && progEl.textContent !== progTxt) progEl.textContent = progTxt;
+
+    // Reaction buttons — rebuild if myReact changed OR first render (innerHTML empty)
+    var reactBtns = document.getElementById('cvr-react-btns');
+    if (reactBtns) {
+      var reactEmojis = ['😂','🔥','💀','👏','😮','🤣'];
+      var curMark = reactBtns.getAttribute('data-react');
+      // curMark===null means first render; always build then
+      if (curMark === null || curMark !== (myReact || '')) {
+        reactBtns.setAttribute('data-react', myReact || '');
+        reactBtns.innerHTML = reactEmojis.map(function(em) {
+          return '<button class="chaos-react-btn' + (myReact===em?' reacting':'') + '" data-chaos-react="1" data-emoji="' + em + '">' + em + '</button>';
+        }).join('');
+      }
+    }
+
+    // Reactions stage — keyed, spread positions
+    var stage = document.getElementById('cvr-react-stage');
+    if (stage) {
+      // Build a keyed map so we only add NEW reactions, never rebuild existing ones
+      var existing = {};
+      stage.querySelectorAll('[data-react-pid]').forEach(function(el) {
+        existing[el.getAttribute('data-react-pid')] = el;
+      });
+      // Remove stale
+      Object.keys(existing).forEach(function(pid) {
+        if (!reactions[pid]) existing[pid].remove();
+      });
+      // Add new ones at spread positions along the bottom
+      Object.entries(reactions).forEach(function(pair, idx) {
+        var pid2 = pair[0], emoji = pair[1];
+        if (!existing[pid2]) {
+          var span = document.createElement('span');
+          span.setAttribute('data-react-pid', pid2);
+          span.className = 'chaos-react-float';
+          // Spread across 10%–90% width, staggered vertically by index
+          var leftPct = 8 + (idx * 13) % 82;  // spread across width
+          span.style.left = leftPct + '%';
+          span.style.animationDuration = (2.2 + Math.random() * 0.8) + 's';
+          span.textContent = emoji;
+          stage.appendChild(span);
+        }
+      });
+    }
+  }
+
+  _renderChaosRoundResult(g, players, isHost) {
+    this._showChaosPanel('round-result');
+    var pids = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
+    var rs = g.roundScores||{}, bs = g.bonusScores||{}, ts = g.scores||{};
+    var order = Array.isArray(g.revealOrder) ? g.revealOrder : [];
+    var sorted = pids.slice().sort(function(a,b){return (ts[b]||0)-(ts[a]||0);});
+    var cont = document.getElementById('chaos-round-result-list');
+    if (cont) {
+      // Show leaderboard
+      var lbHtml = sorted.map(function(pid,i) {
+        var p = players[pid]||{}, medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.';
+        var r = rs[pid]||0, b = bs[pid]||0, t = ts[pid]||0;
+        return '<div class="chaos-result-row"><span class="chaos-result-rank">'+medal+'</span>' +
+          '<div class="chaos-result-avatar" style="background:'+Utils.avatarColor(p.name||pid)+'">'+((p.name||'?')[0])+'</div>' +
+          '<div class="chaos-result-name-wrap"><span class="chaos-result-name">'+Utils.escapeHtml(p.name||pid)+'</span>'+(b>0?'<span class="chaos-bonus-badge">💫 ×'+b+'</span>':'')+'</div>' +
+          '<span class="chaos-result-round '+(r>0?'score-pos':r<0?'score-neg':'')+'">'+((r>0?'+':'')+r)+'</span>' +
+          '<span class="chaos-result-total">總分 '+t+'</span></div>';
+      }).join('');
+      // Show this round's pairs (all revealed)
+      var assignments = g.assignments||{}, sentences = g.sentences||{}, modifications = g.modifications||{}, votes = g.votes||{};
+      var pairsHtml = '<div class="chaos-pairs-section"><div class="chaos-pairs-title">本回合所有改句</div>' +
+        order.map(function(editorPid) {
+          var origPid = assignments[editorPid];
+          var editor = players[editorPid]||{}, origAuth = players[origPid]||{};
+          var orig = sentences[origPid]||'', mod = modifications[editorPid]||'';
+          // Tally votes for this card
+          var great = 0, normal = 0, violation = 0;
+          pids.forEach(function(vp) { var r = (votes[vp]||{})[editorPid]; if(r==='great')great++; else if(r==='normal')normal++; else if(r==='violation')violation++; });
+          return '<div class="chaos-pair-card">' +
+            '<div class="chaos-pair-meta"><span class="chaos-pair-editor">改寫者：'+Utils.escapeHtml(editor.name||'???')+'</span></div>' +
+            '<div class="chaos-card-original"><span class="chaos-card-label">原句（'+Utils.escapeHtml(origAuth.name||'???')+'）</span><div class="chaos-card-text">'+Utils.escapeHtml(orig)+'</div></div>' +
+            '<div class="chaos-card-arrow">↓</div>' +
+            '<div class="chaos-card-modified"><div class="chaos-card-text chaos-card-text-mod">'+Utils.escapeHtml(mod)+'</div></div>' +
+            '<div class="chaos-pair-tally">⭐×'+great+'　👍×'+normal+'　❌×'+violation+'</div>' +
+          '</div>';
+        }).join('') + '</div>';
+      cont.innerHTML = lbHtml + pairsHtml;
+    }
+    var nb = document.getElementById('btn-chaos-next-round');
+    if (nb) { nb.classList.toggle('hidden',!isHost); nb.textContent = g.chaosRound>=g.totalRounds?'🏆 查看最終結果':'➡ 下一回合'; }
+  }
+
+  _renderChaosEnd(g, players, isHost) {
+    this._showChaosPanel('end');
+    var pids = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
+    var sc = g.scores||{}, gc = g.greatCounts||{}, vc = g.violationCounts||{}, step = g.endRevealStep||0;
+    var sorted = pids.slice().sort(function(a,b){return (sc[b]||0)-(sc[a]||0);});
+    var cont = document.getElementById('chaos-end-list');
+    if (cont) cont.innerHTML = sorted.map(function(pid,i) {
+      var p = players[pid]||{}, medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.';
+      var t = sc[pid]||0, g2 = gc[pid]||0, v = vc[pid]||0;
+      var sl = step>=2?'⭐ '+g2+' 超棒　❌ '+v+' 違規':step>=1?'⭐ '+g2+' 超棒':'';
+      return '<div class="chaos-result-row chaos-end-row"><span class="chaos-result-rank">'+medal+'</span>' +
+        '<div class="chaos-result-avatar" style="background:'+Utils.avatarColor(p.name||pid)+'">'+((p.name||'?')[0])+'</div>' +
+        '<div class="chaos-end-info"><span class="chaos-result-name">'+Utils.escapeHtml(p.name||pid)+'</span>'+(sl?'<span class="chaos-end-stats">'+sl+'</span>':'')+'</div>' +
+        '<span class="chaos-result-total chaos-end-total">'+t+' 分</span></div>';
+    }).join('');
+    var badges = document.getElementById('chaos-end-badges');
+    if (badges && sorted.length) {
+      var html = '';
+      if (step>=1) { var mg=sorted.reduce(function(a,b){return (gc[a]||0)>=(gc[b]||0)?a:b;},sorted[0]); html+='<div class="chaos-badge chaos-badge-great">⭐ 最受歡迎　<strong>'+Utils.escapeHtml((players[mg]||{}).name||'???')+'</strong></div>'; }
+      if (step>=2) { var mv=sorted.reduce(function(a,b){return (vc[a]||0)>=(vc[b]||0)?a:b;},sorted[0]); html+='<div class="chaos-badge chaos-badge-viol">❌ 最多違規　<strong>'+Utils.escapeHtml((players[mv]||{}).name||'???')+'</strong></div>'; }
+      badges.innerHTML = html;
+    }
+    var rb = document.getElementById('btn-chaos-end-reveal'); if (rb) rb.classList.toggle('hidden', !isHost||step>=2);
+    // Hide back-to-lobby until all awards are revealed
+    var bb = document.getElementById('btn-chaos-back-lobby'); if (bb) bb.classList.toggle('hidden', step < 2);
+  }
+
+  _renderChaosSpectator(g, players) {
+    var cont = document.getElementById('chaos-spectator-content'); if (!cont) return;
+    var pn = { write_sentence:'✏️ 寫初始句子', write_rule:'📜 制定規則', rule_reveal:'🎲 規則揭曉', modify:'🔧 修改中', vote_reveal:'🃏 揭牌評分', round_result:'📊 回合結果', end:'🏆 結束' };
+    var html = '<div class="spec-phase-badge">'+(pn[g.chaosPhase]||g.chaosPhase)+'</div><div class="spec-round-info">第 '+g.chaosRound+' / '+g.totalRounds+' 回合</div>';
+    if (g.selectedRule) html += '<div class="chaos-modify-rule-box" style="margin:8px 0"><span class="chaos-label">規則：</span><span class="chaos-modify-rule-text">'+Utils.escapeHtml(g.selectedRule)+'</span></div>';
+    var sc = g.scores||{};
+    var pids = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
+    if (pids.length) {
+      var sorted = pids.slice().sort(function(a,b){return (sc[b]||0)-(sc[a]||0);});
+      html += '<div class="chaos-result-list">'+sorted.map(function(pid,i){
+        var p = players[pid]||{}, medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.';
+        return '<div class="chaos-result-row"><span class="chaos-result-rank">'+medal+'</span><div class="chaos-result-avatar" style="background:'+Utils.avatarColor(p.name||pid)+'">'+((p.name||'?')[0])+'</div><span class="chaos-result-name">'+Utils.escapeHtml(p.name||pid)+'</span><span class="chaos-result-total">'+((sc[pid]||0)+' 分')+'</span></div>';
+      }).join('')+'</div>';
+    }
+    cont.innerHTML = html;
+  }
+
+
   // ── WW Rendering Entry Point ──────────────────────────
 
   _renderWW(s) {
@@ -2500,7 +3543,11 @@ class UIController {
     const amAlive  = !!(g.alive || {})[myId];
     const isDead   = hasRole && !amAlive && g.wwPhase !== 'end';
     // wolfking with pending secret shot needs special UI even while dead
-    const isWolfkingDeadWithPendingShot = isDead && (g.roles||{})[myId] === 'wolfking' && !g.wolfkingSecretReady;
+    // Wolfking gets secret shot ONLY if wolf-killed (not witch-poisoned)
+    const wkDeathCause = (g.deathLog || {})[myId] || '';
+    const wolfkingWolfKilled = wkDeathCause === '被狼人獵殺'; // only if own-team kill (should not happen) or not witch
+    const isWolfkingDeadWithPendingShot = isDead && (g.roles||{})[myId] === 'wolfking' && !g.wolfkingSecretReady
+      && wkDeathCause !== '被女巫毒殺';  // witch kill = no ability
     // hunter who can shoot needs shot UI on dead overlay
     const isHunterDeadWithShot = isDead && (g.roles||{})[myId] === 'hunter' && g.hunterCanShoot && !g.hunterShot;
 
@@ -2523,15 +3570,17 @@ class UIController {
     if (isDead && !isSpectator) {
       // Exception: if it's the special phase and THIS dead player is the actor (hunter/wolfking),
       // they must see the special panel to take their action — skip the dead overlay.
-      const sp = g.specialPending;
-      const isSpecialActor = g.wwPhase === 'special' && sp && sp.pid === myId;
+      const sp  = g.specialPending;
+      const hdp = g.hunterDecidePending;
+      const isSpecialActor = (g.wwPhase === 'special' && sp && sp.pid === myId)
+                          || (hdp && hdp.pid === myId);
 
       if (!isSpecialActor) {
         this._renderWWDead(g, players, myId, isHost, isWolfkingDeadWithPendingShot, isHunterDeadWithShot);
         if (isHost) this._renderWWDeadHostBar(g);
         return;
       }
-      // Actor falls through to render the special panel below
+      // Actor falls through to render the special / hunter-decide panel below
       this._show('ww-dead-overlay', false);
     }
 
@@ -2566,6 +3615,8 @@ class UIController {
     if (phase === 'vote')         { this._show('ww-panel-vote', true);          this._renderWWVote(g, players, myId, amAlive); }
     if (phase === 'vote_result')  { this._show('ww-panel-vote-result', true);   this._renderWWVoteResult(g, players); }
     if (phase === 'special')      { this._show('ww-panel-special', true);       this._renderWWSpecial(g, players, myId); }
+    // Hunter private decision panel — shown only to the hunter, no phase change
+    this._renderWWHunterDecide(g, players, myId);
     if (phase === 'end')          { this._show('ww-panel-end', true);           this._renderWWEnd(g, players); }
   }
 
@@ -2678,8 +3729,10 @@ class UIController {
           '</div>' +
           '<p class="dead-wk-hint">悄悄選擇一個目標——將在下一個白天生效，無人知曉</p>' +
           '<div class="player-vote-grid">' + chips + '</div>' +
-          (g.wolfkingSecretTarget ?
-            '<p class="dead-wk-chosen">✓ 已選擇目標，等待夜晚結束生效…</p>' : '') +
+          (g.wolfkingSecretTarget
+            ? '<p class="dead-wk-chosen">✓ 已選擇目標，等待夜晚結束生效…</p>'
+            : '<button class="special-pass-btn" style="margin-top:10px;width:100%" onclick="wwEngine.sendAction({type:WW_ACTION.WOLFKING_PASS})">🤝 放棄，不帶走任何人</button>'
+          ) +
         '</div>';
     }
 
@@ -2704,9 +3757,14 @@ class UIController {
         '<span class="spec-phase">' + (phaseNames[phase]||phase) + '</span>' +
         (round > 0 ? '<span class="spec-round">第 ' + round + ' 夜</span>' : '') +
       '</div>' +
-      '<div class="spec-table-header"><span>玩家</span><span>存活</span><span>職業（點擊顯示）</span></div>' +
-      '<div class="spectator-role-table">' + rows + '</div>' +
-      '<div class="spectator-hint">你已出局，可靜靜觀察剩餘玩家的動向。' + (isHost ? ' 主持人控制列在右上角。' : '') + '</div>';
+      // Hide role table if this player still has a pending special action
+      // (they'll be moved to the special panel once it fires)
+      (isWolfkingPending || isHunterPending || !!(g.hunterDecidePending && g.hunterDecidePending.pid === myId)
+        ? '<div class="dead-pending-hint">⏳ 等待你的最後技能發動…</div>'
+        : '<div class="spec-table-header"><span>玩家</span><span>存活</span><span>職業（點擊顯示）</span></div>' +
+          '<div class="spectator-role-table">' + rows + '</div>' +
+          '<div class="spectator-hint">你已出局，可靜靜觀察剩餘玩家的動向。' + (isHost ? ' 主持人控制列在右上角。' : '') + '</div>'
+      );
   }
 
   // Dead host floating control bar — lets host manage game even after death
@@ -3448,6 +4506,49 @@ class UIController {
         '</div>';
   }
 
+  _renderWWHunterDecide(g, players, myId) {
+    // Private panel shown ONLY to the hunter while they decide.
+    // CRITICAL: Must not run when wwPhase is 'special' — that phase has its own panel rendering.
+    if (g.wwPhase === 'special') return;
+
+    const hdp = g.hunterDecidePending;
+    const panel = document.getElementById('ww-panel-special');
+    if (!panel) return;
+
+    if (!hdp || hdp.pid !== myId) {
+      // Not this player's decide — clean up only if WE set this panel
+      if (panel.getAttribute('data-for') === 'hunter-decide') {
+        panel.innerHTML = ''; panel.setAttribute('data-for', '');
+        this._show('ww-panel-special', false);
+      }
+      return;
+    }
+
+    // Show the private decide panel
+    this._show('ww-panel-special', true);
+    // Only rebuild if not already showing decide UI (avoid flicker)
+    if (panel.getAttribute('data-for') !== 'hunter-decide') {
+      panel.setAttribute('data-for', 'hunter-decide');
+      const causeText = hdp.cause === 'wolf' ? '你被狼人獵殺，但你還有最後一槍' : '你被票出局，但你還有最後一槍';
+      panel.innerHTML =
+        '<div class="special-stage special-hunter-bg">' +
+          '<div class="special-reveal-row">' +
+            '<div class="special-role-icon">🏹</div>' +
+            '<div class="special-reveal-info">' +
+              '<div class="special-badge">獵人已出局</div>' +
+              '<div class="special-actor-name">只有你看得到此畫面</div>' +
+            '</div>' +
+          '</div>' +
+          '<h2 class="special-headline">你要帶走一名玩家嗎？</h2>' +
+          '<p class="special-subline">' + causeText + '</p>' +
+          '<div class="hunter-decide-btns">' +
+            '<button class="hunter-decide-yes" onclick="wwEngine.sendAction({type:WW_ACTION.HUNTER_DECIDE})">🏹 是，我要亮牌並帶走一人</button>' +
+            '<button class="hunter-decide-no"  onclick="wwEngine.sendAction({type:WW_ACTION.HUNTER_PASS})">🤝 否，讓我安靜地離開</button>' +
+          '</div>' +
+        '</div>';
+    }
+  }
+
   _renderWWSpecial(g, players, myId) {
     var sp = g.specialPending;
     if (!sp) return;
@@ -3466,6 +4567,7 @@ class UIController {
         ? (g.hunterShootCause === 'wolf' ? '你被狼人擊倒，但你有最後一槍！' : '你被放逐，但你有最後一槍！')
         : '獵人正在瞄準目標…',
       action    : WW_ACTION.HUNTER_SHOOT,
+      passAction: WW_ACTION.HUNTER_PASS,
       waitLabel : '等待獵人選擇目標…',
       waitIcon  : '🏹',
     } : {
@@ -3475,6 +4577,7 @@ class UIController {
       headline  : isActor ? '你是狼王 — 臨死帶走一名玩家！' : (Utils.escapeHtml(actorP.name||sp.pid) + ' 身份揭露！'),
       subline   : isActor ? '選擇你的最後一擊目標' : '狼王正在選擇目標…',
       action    : WW_ACTION.WOLFKING_SHOOT,
+      passAction: WW_ACTION.WOLFKING_PASS,
       waitLabel : '等待狼王選擇目標…',
       waitIcon  : '👑',
     };
@@ -3500,7 +4603,6 @@ class UIController {
 
     panel.innerHTML =
       '<div class="special-stage ' + cfg.bgClass + '">' +
-        // Dramatic actor reveal
         '<div class="special-reveal-row">' +
           '<div class="special-actor-avatar" style="background:' + actorColor + '">' + actorInitial + '</div>' +
           '<div class="special-reveal-info">' +
@@ -3515,7 +4617,12 @@ class UIController {
 
         (isActor
           ? '<div class="special-target-grid">' + gridHtml + '</div>' +
-            '<p class="special-must-choose">必須選擇一人，此操作無法撤銷</p>'
+            '<div class="special-actor-actions">' +
+              '<p class="special-must-choose">選擇帶走一人，或選擇放棄</p>' +
+              '<button class="special-pass-btn" onclick="wwEngine.sendAction({type:\'' + cfg.passAction + '\'})">' +
+                '🤝 放棄，不帶任何人' +
+              '</button>' +
+            '</div>'
           : '<div class="special-watching">' +
               '<div class="special-watch-icon">' + cfg.waitIcon + '</div>' +
               '<p class="special-watch-label">' + cfg.waitLabel + '</p>' +
