@@ -58,6 +58,7 @@ const ROLES = {
   knight  : { id:'knight',  name:'騎士',   team:'village', icon:'⚔️', desc:'白天可向任意玩家發起決鬥——若對方是狼人則對方死；若是好人則自己死。每局限一次。' },
   bomber  : { id:'bomber',  name:'炸彈客', team:'bomber',  icon:'💣', desc:'第三方！目標：在白天被全員票出局，可單獨獲勝。被票出局時，所有投你的人一起陣亡。' },
   cupid   : { id:'cupid',   name:'邱比特', team:'village', icon:'💘', desc:'第一個夜晚指定兩名玩家為情侶（可包含自己）。若其中一位情侶死亡，另一位立刻殉情。若情侶分屬不同陣營，邱比特與兩位情侶成為第三方，勝利條件變為讓其餘所有玩家出局。' },
+  gravedigger: { id:'gravedigger', name:'守墓人', team:'village', icon:'⚰️', desc:'第二夜起可得知上一白天投票放逐出局玩家的陣營。被狼人刀死、女巫毒死、或獵人射死者不算；若無人被投出局，則無任何訊息。' },
 };
 
 const WW_ACTION = {
@@ -79,6 +80,7 @@ const WW_ACTION = {
   CUPID_SELECT     : 'ww_cupid_select',   // cupid toggles a lover candidate
   CUPID_CONFIRM    : 'ww_cupid_confirm',  // cupid locks in the pair
   LOVER_ACK        : 'ww_lover_ack',      // lover dismisses the notification
+  NIGHT_DONE       : 'ww_night_done',     // passive/gravedigger confirm done
   VOTE             : 'ww_vote',           // select/change candidate (unlocked)
   VOTE_LOCK        : 'ww_vote_lock',      // lock your current selection
   VOTE_UNLOCK      : 'ww_vote_unlock',    // unlock to re-select
@@ -265,6 +267,7 @@ const makeWerewolfGame = () => ({
   loverTeam            : null,           // 'village'|'wolf'|'third'
   cupidId              : null,           // who plays cupid
   loverAcks            : {},             // { pid: true } — lover dismissed notification
+  gravediggerLog       : [],             // [{round, pid, name, team}] — vote-eliminated per round
 });
 
 class Store {
@@ -484,6 +487,28 @@ class FirebaseTransport {
     this._off.forEach(fn => fn());
     this._off = [];
   }
+
+  // ── Task 2: Kick player ────────────────────────────────
+  kickPlayer(code, pid) {
+    return this.ref('rooms/' + code + '/players/' + pid).remove()
+      .catch(e => console.warn('[transport] kick:', e));
+  }
+
+  // ── Task 3: Chat ───────────────────────────────────────
+  pushChat(code, msg) {
+    this.ref('rooms/' + code + '/chat').push(
+      Object.assign({}, msg, { ts: Date.now() })
+    ).catch(() => {});
+  }
+
+  watchChat(code, cb) {
+    const r = this.ref('rooms/' + code + '/chat');
+    // Load last 50 messages then listen for new ones
+    const h = r.limitToLast(50).on('child_added', snap => {
+      if (snap.exists()) cb(snap.val());
+    });
+    this._off.push(() => r.off('child_added', h));
+  }
 }
 
 const transport = new FirebaseTransport();
@@ -590,24 +615,41 @@ class RoomManager {
       (pid, data) => bus.emit(EVT.PLAYER_CHANGED, { id: pid, name: data.name, isSpectator: !!data.isSpectator }),
     );
 
-    // Room-empty watcher: auto-deletes room when all presence nodes gone (browser close)
+    // Room-empty watcher
     transport._watchRoomEmpty(roomCode);
 
-    // Game state: non-hosts receive from Firebase; host is the source and ignores own writes
+    // Game state
     transport.watchGameState(roomCode, game => {
       if (store.get().isHost) return;
       bus.emit(EVT.GAME_STATE_UPDATED, { state: game });
     });
 
-    // Settings sync: non-hosts watch live settings from host
+    // Settings sync
     if (!isHost) {
       transport.watchSettings(roomCode, settings => {
         bus.emit(EVT.SETTINGS_UPDATED, { settings });
       });
     }
 
-    // Actions: only host processes
+    // Actions
     if (isHost) this.startWatchingActions();
+
+    // Task 3: Chat — all clients watch chat
+    transport.watchChat(roomCode, msg => {
+      bus.emit('chat:message', { msg });
+    });
+
+    // Task 2: Watch for own removal (kick detection)
+    // Use transport._off so teardown() cleans this up before hardLeave()'s removePlayer fires
+    const myRef = transport.ref('rooms/' + roomCode + '/players/' + myId);
+    const kickH = myRef.on('value', snap => {
+      const s = store.get();
+      // Only trigger if we're still in this room and the node vanished
+      if (!snap.exists() && s.roomCode === roomCode && s.myId === myId) {
+        bus.emit('room:kicked');
+      }
+    });
+    transport._off.push(() => myRef.off('value', kickH));
   }
 }
 
@@ -937,6 +979,7 @@ class WerewolfEngine {
     else if (t === WW_ACTION.CUPID_SELECT)     this._cupidSelect(pid, a.targetId);
     else if (t === WW_ACTION.CUPID_CONFIRM)    this._cupidConfirm(pid);
     else if (t === WW_ACTION.LOVER_ACK)        this._loverAck(pid);
+    else if (t === WW_ACTION.NIGHT_DONE)       this._nightDoneAck(pid);
     else if (t === WW_ACTION.VOTE)             this._voteSelect(pid, a.targetId);
     else if (t === WW_ACTION.VOTE_LOCK)        this._voteLock(pid);
     else if (t === WW_ACTION.VOTE_UNLOCK)      this._voteUnlock(pid);
@@ -984,11 +1027,15 @@ class WerewolfEngine {
 
   _startNight() {
     const g  = store.get().game;
-    this.stopVoteTimer(); // Clear any lingering vote timer
+    this.stopVoteTimer();
 
-    // Passive roles (villager/bomber/knight) now confirm manually via their button.
-    // Only pre-confirm active roles that haven't checked in yet (none at start).
-    const nightConfirmed = {};
+    // Pre-confirm gravedigger on round 1 (no info available yet)
+    // and cupid on rounds > 1 (their action only applies round 1)
+    const preConfirm = {};
+    if (g.cupidId && g.cupidDone) preConfirm[g.cupidId] = true;
+    // Gravedigger gets pre-confirmed on round 1 (nothing to review yet)
+    const gdPid = Object.keys(g.roles||{}).find(id => g.roles[id] === 'gravedigger' && (g.alive||{})[id]);
+    if (gdPid && (g.wwRound + 1) === 1) preConfirm[gdPid] = true;
 
     store.patchGame({
       wwPhase              : 'night',
@@ -1001,9 +1048,7 @@ class WerewolfEngine {
       witchPoison          : null,
       witchDone            : false,
       hunterDone           : false,
-      // Don't reset hunterCanShoot/hunterShot — they persist across nights
-      // Pre-confirm cupid on rounds > 1 (their action only applies round 1)
-      nightConfirmed       : g.cupidDone ? { [g.cupidId]: true } : {},
+      nightConfirmed       : preConfirm,
       discussReady         : {},
       votes                : {},
       voteLocked           : {},
@@ -1030,7 +1075,13 @@ class WerewolfEngine {
     const g = store.get().game;
     if (g.wwPhase !== 'night') return;
     const alivePids    = Object.keys(g.alive).filter(id => g.alive[id]);
-    const needsAction  = alivePids.filter(pid => NIGHT_ACTIVE_ROLES.has(g.roles[pid]));
+    // Active roles + gravedigger (round >= 2) must confirm before night ends
+    const needsAction  = alivePids.filter(pid => {
+      const r = g.roles[pid];
+      if (NIGHT_ACTIVE_ROLES.has(r)) return true;
+      if (r === 'gravedigger' && g.wwRound >= 2) return true;
+      return false;
+    });
     if (needsAction.length > 0 && needsAction.every(pid => g.nightConfirmed[pid])) {
       this.stopTimer();
       this._resolveNight();
@@ -1109,8 +1160,9 @@ class WerewolfEngine {
     const g = store.get().game;
     if (g.wwPhase !== 'night' || g.witchDone) return;
     if (g.roles[pid] !== 'witch' || g.witchAntidoteUsed || !g.wolfTarget) return;
-    // Toggle: click again to undo
-    store.patchGame({ witchSave: !g.witchSave });
+    // If poison already selected this night, cancel it first (one potion per night)
+    const newSave = !g.witchSave;
+    store.patchGame({ witchSave: newSave, witchPoison: newSave ? null : g.witchPoison });
     this.broadcast();
   }
 
@@ -1119,8 +1171,11 @@ class WerewolfEngine {
     if (g.wwPhase !== 'night' || g.witchDone) return;
     if (g.roles[pid] !== 'witch' || g.witchPoisonUsed) return;
     if (targetId && !g.alive[targetId]) return;
-    // Toggle same target to unselect; select different target to replace
-    store.patchGame({ witchPoison: g.witchPoison === targetId ? null : targetId });
+    // Cannot poison self
+    if (targetId === pid) return;
+    // If save already selected this night, cancel it first (one potion per night)
+    const newTarget = g.witchPoison === targetId ? null : targetId;
+    store.patchGame({ witchPoison: newTarget, witchSave: newTarget ? false : g.witchSave });
     this.broadcast();
   }
 
@@ -1499,12 +1554,21 @@ class WerewolfEngine {
     // Hunter killed by vote → skip lover propagation (hunter gets special phase instead)
     if (role !== 'hunter') this._propagateLoverDeath(alive, deathLog, store.get().game);
 
-    store.patchGame({ alive, deathLog, wwPhase: 'vote_result', voteEliminated: eliminated, voteVoters: voters, abstainCount });
+    // Task 6: Record for gravedigger — determine team of eliminated
+    const elimRole = ROLES[role] || ROLES.villager;
+    const { players } = store.get();
+    const gravediggerLog = [...(g.gravediggerLog || []), {
+      round : g.wwRound,
+      pid   : eliminated,
+      name  : (players[eliminated] || {}).name || eliminated,
+      team  : elimRole.team,
+    }];
+
+    store.patchGame({ alive, deathLog, wwPhase: 'vote_result', voteEliminated: eliminated, voteVoters: voters, abstainCount, gravediggerLog });
     this.broadcast();
     setTimeout(() => {
       if (this._checkWin()) return;
       if (role === 'hunter') {
-        // Hunter voted out → private decision first (silent or reveal)
         store.patchGame({ hunterDecidePending: { pid: eliminated, cause: 'vote' } });
         this.broadcast();
       } else {
@@ -1718,7 +1782,7 @@ const CHAOS_ACTION = {
   RETURN_LOBBY     : 'chaos_return_lobby',
 };
 
-const CHAOS_SCORE = { violation: -2, normal: 1, great: 4 };
+const CHAOS_SCORE = { violation: -500, npc: -100, normal: 100, great: 300, goat: 500 };
 
 // chaosPhase: write_sentence | write_rule | rule_reveal | modify | vote_reveal | round_result | end
 const makeChaosGame = () => ({
@@ -1908,7 +1972,7 @@ class ChaosEngine {
   _voteCard(pid, rating) {
     const g = store.get().game;
     if (g.chaosPhase !== 'vote_reveal') return;
-    if (!['violation','normal','great'].includes(rating)) return;
+    if (!['violation','npc','normal','great','goat'].includes(rating)) return;
     const order   = g.revealOrder || [];
     const cardIdx = typeof g.voteCardIndex === 'number' ? g.voteCardIndex : 0;
     if (cardIdx >= order.length) return;
@@ -2012,8 +2076,9 @@ class ChaosEngine {
         if (voterPid === editorPid) return;
         const r = (votes[voterPid] || {})[editorPid]; if (!r) return;
         roundScores[editorPid] += CHAOS_SCORE[r] || 0;
-        if (r === 'great')     newGreat[editorPid] = (newGreat[editorPid] || 0) + 1;
-        if (r === 'violation') newViol[editorPid]  = (newViol[editorPid]  || 0) + 1;
+        // Track "top" ratings (great/goat) and "bottom" ratings (violation/npc)
+        if (r === 'great' || r === 'goat') newGreat[editorPid] = (newGreat[editorPid] || 0) + 1;
+        if (r === 'violation' || r === 'npc') newViol[editorPid] = (newViol[editorPid] || 0) + 1;
       });
     });
     Object.values(bonusVotes).forEach(t => { if (bonusScores[t] !== undefined) bonusScores[t]++; });
@@ -2101,7 +2166,30 @@ class UIController {
 
     store.subscribe(s => this._sync(s));
     bus.on(EVT.TOAST,       d  => this.toast(d.msg, d.type));
-    bus.on(EVT.RETURN_LOBBY, () => this.show('room'));
+    bus.on(EVT.RETURN_LOBBY, () => {
+      this.show('room')
+      ['chaos-sentence-input','chaos-rule-input','chaos-modify-input'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el){
+          el.value = '';
+          el.removeAttribute('data-round');
+        }
+      });
+    });
+
+    // Task 3: Chat messages from Firebase
+    bus.on('chat:message', ({ msg }) => {
+      this._appendChatMsg(msg);
+    });
+
+    // Task 2: Kicked event — show prominent modal
+    bus.on('room:kicked', () => {
+      transport.teardown();
+      store.set({ myId: null, myName: '', roomCode: '', isHost: false, hostId: null, isSpectator: false, players: {}, game: makeGame() });
+      // Show kicked modal
+      const modal = document.getElementById('kicked-modal');
+      if (modal) modal.classList.remove('hidden');
+    });
 
     bus.on(EVT.ROOM_JOINED, ({ roomCode }) => {
       this._setText('display-room-code', roomCode);
@@ -2125,6 +2213,14 @@ class UIController {
           const el = document.getElementById('screen-ww-game');
           if (el) { el.classList.remove('hidden'); el.classList.add('active'); }
           this._screen = 'ww-game';
+
+          ['chaos-sentence-input', 'chaos-rule-input', 'chaos-modify-input'].forEach(id => {
+            const inp = document.getElementById(id);
+            if (inp) {
+              inp.value = '';
+              inp.removeAttribute('data-round');
+            }
+          });
         }
         this._renderWW(Object.assign({}, store.get(), { game: state }));
         return;
@@ -2169,6 +2265,26 @@ class UIController {
     this._bindGame();
     this._bindWWGame();
     this._bindChaosGame();
+    this._bindChat();
+
+    // Kicked modal OK button
+    var self = this;
+    var kickedOk = document.getElementById('btn-kicked-ok');
+    if (kickedOk) kickedOk.addEventListener('click', function() {
+      var modal = document.getElementById('kicked-modal');
+      if (modal) modal.classList.add('hidden');
+      self.show('home');
+    });
+
+    // Seer result modal ACK
+    var seerAck = document.getElementById('btn-seer-result-ack');
+    if (seerAck) seerAck.addEventListener('click', function() {
+      var m = document.getElementById('seer-result-modal');
+      if (m) { m.classList.add('hidden'); m._ackedRound = true; }
+      // Confirm done so night can progress
+      wwEngine.sendAction({ type: WW_ACTION.NIGHT_DONE });
+    });
+
     this.show('home');
   }
 
@@ -2236,7 +2352,7 @@ class UIController {
   // ── Room rendering ────────────────────────────────────
 
   _renderPlayers(players, myId, hostId) {
-    const { settings, isSpectator } = store.get();
+    const { settings, isSpectator, isHost } = store.get();
     const maxP = (settings || {}).maxPlayers || 12;
     const cnt  = document.getElementById('player-count');
     const lst  = document.getElementById('players-list');
@@ -2244,20 +2360,35 @@ class UIController {
     const n = Object.keys(players).length;
     cnt.textContent = n + ' / ' + maxP;
     lst.innerHTML = Object.entries(players).map(function([id, p]) {
-      const isHost = id === hostId;
+      const amHost = id === hostId;
       const isMe   = id === myId;
-      return '<li class="player-item ' + (isHost ? 'is-host' : '') + (p.isSpectator ? ' is-spectator' : '') + '">' +
+      const canKick = isHost && !isMe;
+      return '<li class="player-item ' + (amHost ? 'is-host' : '') + (p.isSpectator ? ' is-spectator' : '') + '">' +
         '<div class="player-avatar" style="background:' + Utils.avatarColor(p.name) + '">' + (p.name || '?')[0] + '</div>' +
         '<span class="player-name">' + Utils.escapeHtml(p.name) + '</span>' +
         '<div class="player-badges">' +
-          (isHost ? '<span class="p-badge p-badge-host">👑 主持人</span>' : '') +
+          (amHost ? '<span class="p-badge p-badge-host">👑 主持人</span>' : '') +
           (isMe   ? '<span class="p-badge p-badge-you">你</span>' : '') +
           (p.isSpectator ? '<span class="p-badge p-badge-spec">👁 觀戰</span>' : '') +
           (!p.isSpectator ? '<span class="p-badge p-badge-conn">在線</span>' : '') +
-        '</div></li>';
+        '</div>' +
+        (canKick ? '<button class="player-kick-btn" data-kick-id="' + id + '" title="踢出玩家">✕ 踢出</button>' : '') +
+        '</li>';
     }).join('');
 
-    // Spectator toggle button: shows enter/exit based on current state
+    // Kick button delegation
+    lst.querySelectorAll('.player-kick-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const kickId = btn.getAttribute('data-kick-id');
+        const p = players[kickId] || {};
+        if (!confirm('確定要踢出 ' + (p.name || kickId) + ' 嗎？')) return;
+        const { roomCode } = store.get();
+        await transport.kickPlayer(roomCode, kickId);
+        bus.emit(EVT.TOAST, { msg: (p.name || kickId) + ' 已被踢出房間', type: 'info' });
+      });
+    });
+
+    // Spectator toggle button
     const toggleBtn = document.getElementById('btn-toggle-spectator');
     if (toggleBtn) {
       if (isSpectator) {
@@ -2665,33 +2796,46 @@ class UIController {
 
   _bindRoom() {
     var self = this;
+    // ── Task 4: Copy button circle-to-checkmark animation ──
     this._on('btn-copy-code', 'click', function() {
       var code = (document.getElementById('display-room-code') || {}).textContent || '';
       var btn  = document.getElementById('btn-copy-code');
-      var doFeedback = function(ok) {
-        if (!btn) return;
-        btn.classList.add('btn-copying');
-        setTimeout(function() {
-          btn.classList.remove('btn-copying');
-          btn.classList.add(ok ? 'btn-copied-ok' : 'btn-copied-fail');
-          setTimeout(function() { btn.classList.remove('btn-copied-ok','btn-copied-fail'); }, 1200);
-        }, 120);
+      if (!btn || btn.classList.contains('is-copying')) return;
+
+      var doSuccess = function() {
+        btn.classList.remove('is-copying');
+        btn.classList.add('is-copied');
+        setTimeout(function() { btn.classList.remove('is-copied'); }, 2200);
+        self.toast('房間代碼已複製！', 'success');
       };
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(code)
-          .then(function() { doFeedback(true); self.toast('房間代碼已複製！', 'success'); })
-          .catch(function() { doFeedback(false); self.toast('代碼：' + code, 'info'); });
-      } else {
-        try {
-          var ta = document.createElement('textarea');
-          ta.value = code; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
-          doFeedback(true); self.toast('房間代碼已複製！', 'success');
-        } catch(_) { doFeedback(false); self.toast('代碼：' + code, 'info'); }
-      }
+      var doFail = function() {
+        btn.classList.remove('is-copying');
+        self.toast('代碼：' + code, 'info');
+      };
+
+      btn.classList.add('is-copying');
+      // Arc animation duration = 650ms, then flip to check
+      setTimeout(function() {
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(code).then(doSuccess).catch(doFail);
+        } else {
+          try {
+            var ta = document.createElement('textarea');
+            ta.value = code; document.body.appendChild(ta); ta.select();
+            document.execCommand('copy'); document.body.removeChild(ta);
+            doSuccess();
+          } catch(_) { doFail(); }
+        }
+      }, 650);
     });
 
     this._on('btn-leave-room', 'click', async function() {
       await roomManager.hardLeave();
+      // Clear chat for next session
+      var msgs = document.getElementById('fc-messages');
+      if (msgs) msgs.innerHTML = '';
+      self._chatSeenTs = 0;
+      self._showFloatingChat(false);
       self.show('home');
     });
 
@@ -2829,7 +2973,7 @@ class UIController {
     function pushChaos() {
       var s  = store.get().settings;
       var cc = Object.assign({}, s.chaosConfig || {}, {
-        totalRounds : Utils.clamp(parseInt((document.getElementById('chaos-rounds')||{}).value||5),2,15),
+        totalRounds : Utils.clamp(parseInt((document.getElementById('chaos-rounds')||{}).value||5),1,15),
         writeTime   : Utils.clamp(parseInt((document.getElementById('chaos-write-time')||{}).value||60),20,180),
         modifyTime  : Utils.clamp(parseInt((document.getElementById('chaos-modify-time')||{}).value||60),20,180),
         voteTime    : Utils.clamp(parseInt((document.getElementById('chaos-vote-time')||{}).value||20),10,60),
@@ -2887,7 +3031,7 @@ class UIController {
         return self._err('room-error', '規則混亂至少需要 3 名玩家');
       var s   = store.get().settings;
       var cc  = s.chaosConfig || {};
-      var totalRounds = Utils.clamp(parseInt((document.getElementById('chaos-rounds') || {}).value || 5), 2, 15);
+      var totalRounds = Utils.clamp(parseInt((document.getElementById('chaos-rounds') || {}).value || 5), 1, 15);
       var writeTime   = Utils.clamp(parseInt((document.getElementById('chaos-write-time') || {}).value || 60), 20, 180);
       var modifyTime  = Utils.clamp(parseInt((document.getElementById('chaos-modify-time') || {}).value || 60), 20, 180);
       var voteTime    = Utils.clamp(parseInt((document.getElementById('chaos-vote-time') || {}).value || 30), 10, 90);
@@ -3027,6 +3171,11 @@ class UIController {
       wwEngine.sendAction({ type: WW_ACTION.CUPID_CONFIRM });
     });
 
+    // Gravedigger: confirm done
+    this._on('btn-gravedigger-done', 'click', function() {
+      wwEngine.sendAction({ type: WW_ACTION.NIGHT_DONE });
+    });
+
     // Lover: acknowledge notification
     this._on('btn-lover-ack', 'click', function() {
       wwEngine.sendAction({ type: WW_ACTION.LOVER_ACK });
@@ -3081,6 +3230,185 @@ class UIController {
           cell.innerHTML = '<span class="spec-role-text team-' + team + '">' + Utils.escapeHtml(role) + '</span>';
         }
       });
+    }
+  }
+
+  // ── Task 3: Floating Chat binding ────────────────────
+
+  _bindChat() {
+    var self = this;
+    this._chatSeenTs   = 0;
+    this._chatUnread   = 0;
+    this._chatOpen     = false;
+    this._chatMinimized = false;
+
+    // ── Show/hide chat on room screen ──────────────────
+    bus.on(EVT.ROOM_JOINED, function() {
+      // Clear old messages before showing chat for new room
+      var msgs = document.getElementById('fc-messages');
+      if (msgs) msgs.innerHTML = '';
+      self._chatSeenTs = 0;
+      self._chatUnread = 0;
+      var dot = document.getElementById('fc-unread-dot');
+      if (dot) dot.classList.add('hidden');
+      self._showFloatingChat(true);
+    });
+    bus.on(EVT.RETURN_LOBBY, function() { self._showFloatingChat(true); });
+    bus.on('room:kicked', function() { self._showFloatingChat(false); });
+
+    // Hide chat when leaving room
+    var origHardLeave = null; // handled by show('home') route
+
+    // ── Open / close ───────────────────────────────────
+    var openBtn  = document.getElementById('fc-open-btn');
+    var chat     = document.getElementById('floating-chat');
+    var closeBtn = document.getElementById('fc-close-btn');
+    var toggleBtn= document.getElementById('fc-toggle-btn');
+    var body     = document.getElementById('fc-body');
+
+    if (openBtn) openBtn.addEventListener('click', function() {
+      self._chatOpen = true;
+      self._chatMinimized = false;
+      self._chatUnread = 0;
+      if (chat) { chat.classList.remove('hidden'); chat.classList.remove('fc-minimized'); }
+      openBtn.classList.add('hidden');
+      var dot = document.getElementById('fc-unread-dot');
+      if (dot) dot.classList.add('hidden');
+      var msgs = document.getElementById('fc-messages');
+      if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    });
+
+    if (closeBtn) closeBtn.addEventListener('click', function() {
+      self._chatOpen = false;
+      if (chat) chat.classList.add('hidden');
+      if (openBtn) openBtn.classList.remove('hidden');
+    });
+
+    if (toggleBtn) toggleBtn.addEventListener('click', function() {
+      self._chatMinimized = !self._chatMinimized;
+      if (chat) chat.classList.toggle('fc-minimized', self._chatMinimized);
+      toggleBtn.textContent = self._chatMinimized ? '▲' : '▼';
+    });
+
+    // ── Drag to reposition ─────────────────────────────
+    var header = document.getElementById('fc-header');
+    if (chat && header) {
+      var dragging = false, ox = 0, oy = 0;
+      header.addEventListener('mousedown', function(e) {
+        if (e.target.closest('button')) return;
+        dragging = true;
+        var rect = chat.getBoundingClientRect();
+        ox = e.clientX - rect.left;
+        oy = e.clientY - rect.top;
+        chat.style.transition = 'none';
+        e.preventDefault();
+      });
+      document.addEventListener('mousemove', function(e) {
+        if (!dragging) return;
+        var x = Math.max(0, Math.min(window.innerWidth  - chat.offsetWidth,  e.clientX - ox));
+        var y = Math.max(0, Math.min(window.innerHeight - chat.offsetHeight, e.clientY - oy));
+        chat.style.right  = 'auto';
+        chat.style.bottom = 'auto';
+        chat.style.left   = x + 'px';
+        chat.style.top    = y + 'px';
+      });
+      document.addEventListener('mouseup', function() {
+        if (dragging) { dragging = false; chat.style.transition = ''; }
+      });
+      // Touch drag
+      header.addEventListener('touchstart', function(e) {
+        if (e.target.closest('button')) return;
+        var t = e.touches[0];
+        dragging = true;
+        var rect = chat.getBoundingClientRect();
+        ox = t.clientX - rect.left;
+        oy = t.clientY - rect.top;
+        chat.style.transition = 'none';
+      }, { passive: true });
+      document.addEventListener('touchmove', function(e) {
+        if (!dragging) return;
+        var t = e.touches[0];
+        var x = Math.max(0, Math.min(window.innerWidth  - chat.offsetWidth,  t.clientX - ox));
+        var y = Math.max(0, Math.min(window.innerHeight - chat.offsetHeight, t.clientY - oy));
+        chat.style.right  = 'auto';
+        chat.style.bottom = 'auto';
+        chat.style.left   = x + 'px';
+        chat.style.top    = y + 'px';
+      }, { passive: true });
+      document.addEventListener('touchend', function() {
+        if (dragging) { dragging = false; chat.style.transition = ''; }
+      });
+    }
+
+    // ── Send message ───────────────────────────────────
+    var sendMsg = function() {
+      var inp = document.getElementById('fc-input');
+      if (!inp) return;
+      var text = inp.value.trim();
+      if (!text) return;
+      var s = store.get();
+      if (!s.roomCode || !s.myId) return;
+      inp.value = '';
+      transport.pushChat(s.roomCode, {
+        pid : s.myId, name: s.myName || '???', text: text,
+      });
+    };
+
+    var fcSend = document.getElementById('fc-send-btn');
+    if (fcSend) fcSend.addEventListener('click', sendMsg);
+    var fcInp = document.getElementById('fc-input');
+    if (fcInp) fcInp.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+    });
+  }
+
+  _showFloatingChat(visible) {
+    var chat    = document.getElementById('floating-chat');
+    var openBtn = document.getElementById('fc-open-btn');
+    if (!visible) {
+      if (chat)    chat.classList.add('hidden');
+      if (openBtn) openBtn.classList.add('hidden');
+      this._chatOpen = false;
+    } else {
+      // Enter room: default CLOSED — show open button, hide the window
+      this._chatOpen = false;
+      this._chatMinimized = false;
+      if (chat)    chat.classList.add('hidden');
+      if (openBtn) openBtn.classList.remove('hidden');
+    }
+  }
+
+  _appendChatMsg(msg) {
+    var cont = document.getElementById('fc-messages');
+    if (!cont) return;
+    if (msg.ts && msg.ts <= this._chatSeenTs) return;
+    if (msg.ts) this._chatSeenTs = Math.max(this._chatSeenTs, msg.ts);
+
+    var s    = store.get();
+    var isMe = msg.pid === s.myId;
+    var el   = document.createElement('div');
+    el.className = 'fc-msg' + (isMe ? ' fc-msg-me' : '');
+    el.innerHTML =
+      '<span class="fc-msg-name' + (isMe ? ' fc-msg-name-me' : '') + '">' + Utils.escapeHtml(msg.name || '???') + '</span>' +
+      '<span class="fc-msg-text">' + Utils.escapeHtml(msg.text || '') + '</span>';
+    cont.appendChild(el);
+
+    // Scroll to bottom
+    cont.scrollTop = cont.scrollHeight;
+
+    // Update online badge
+    var badge = document.getElementById('fc-online-badge');
+    if (badge) badge.textContent = Object.keys(s.players || {}).length + ' 人在線';
+
+    // Unread dot if minimized or closed
+    if (!this._chatOpen || this._chatMinimized) {
+      if (!isMe) {
+        this._chatUnread = (this._chatUnread || 0) + 1;
+        var dot = document.getElementById('fc-unread-dot');
+        if (dot) dot.classList.remove('hidden');
+        var openBtn = document.getElementById('fc-open-btn');
+        if (openBtn && !this._chatOpen) openBtn.classList.remove('hidden');
+      }
     }
   }
 
@@ -3198,7 +3526,13 @@ class UIController {
   _renderChaosWriteSentence(g, myId, players) {
     this._showChaosPanel('write-sentence');
     var submitted = !!(g.sentences||{})[myId];
-    if (!submitted) this._chaosInputReset('chaos-sentence-input', g.chaosRound);
+
+    // Always reset ALL inputs at the start of each write_sentence phase.
+    // Use a combined key of round+phase so any new round triggers a clear.
+    var roundKey = String(g.chaosRound) + '_ws';
+    this._chaosInputReset('chaos-sentence-input', roundKey);
+    this._chaosInputReset('chaos-rule-input',     roundKey);
+    this._chaosInputReset('chaos-modify-input',   roundKey);
     var inp = document.getElementById('chaos-sentence-input'); if (inp) inp.disabled = submitted;
     var btn = document.getElementById('btn-chaos-submit-sentence');
     if (btn) { btn.disabled = submitted; btn.textContent = submitted ? '✓ 已提交，等待其他人…' : '✦ 提交句子'; }
@@ -3210,8 +3544,10 @@ class UIController {
 
   _renderChaosWriteRule(g, myId, players) {
     this._showChaosPanel('write-rule');
+    this._chaosInputReset('chaos-sentence-input', g.chaosRound + '_cleanup');
     var submitted = !!(g.rules||{})[myId];
-    if (!submitted) this._chaosInputReset('chaos-rule-input', g.chaosRound);
+    var roundKey  = String(g.chaosRound) + '_wr';
+    if (!submitted) this._chaosInputReset('chaos-rule-input', roundKey);
     var myS = document.getElementById('chaos-your-sentence'); if (myS) myS.textContent = (g.sentences||{})[myId] || '';
     var inp = document.getElementById('chaos-rule-input'); if (inp) inp.disabled = submitted;
     var btn = document.getElementById('btn-chaos-submit-rule');
@@ -3242,7 +3578,8 @@ class UIController {
     var origPid = (g.assignments||{})[myId];
     var oEl = document.getElementById('chaos-modify-original'); if (oEl) oEl.textContent = origPid ? ((g.sentences||{})[origPid]||'') : '（無）';
     var submitted = !!(g.modifications||{})[myId];
-    if (!submitted) this._chaosInputReset('chaos-modify-input', g.chaosRound);
+    var roundKey  = String(g.chaosRound) + '_mod';
+    if (!submitted) this._chaosInputReset('chaos-modify-input', roundKey);
     var inp = document.getElementById('chaos-modify-input'); if (inp) inp.disabled = submitted;
     var btn = document.getElementById('btn-chaos-submit-modify');
     if (btn) { btn.disabled = submitted; btn.textContent = submitted ? '✓ 已提交，等待其他人…' : '✦ 提交修改結果'; }
@@ -3340,21 +3677,22 @@ class UIController {
     if (ratingRow) {
       if (!isSelf && !myConfirmed) {
         var ratings = [
-          {val:'violation',label:'❌ 違規 −2',cls:'vote-violation'},
-          {val:'normal',   label:'👍 普通 +1',cls:'vote-normal'},
-          {val:'great',    label:'⭐ 超棒 +4',cls:'vote-great'},
+          {val:'violation', label:'💀 拉完了', cls:'vote-violation'},
+          {val:'npc',       label:'🤖 NPC',     cls:'vote-npc'},
+          {val:'normal',    label:'👤 人上人',   cls:'vote-normal'},
+          {val:'great',     label:'⭐ 頂級',     cls:'vote-great'},
+          {val:'goat',      label:'🔥 夯爆了',   cls:'vote-goat'},
         ];
         var newRatingHtml = ratings.map(function(r) {
           return '<button class="chaos-rating-big ' + r.cls + (myVoteForCard===r.val?' selected':'') + '" data-chaos-rate="1" data-rating="' + r.val + '">' + r.label + '</button>';
         }).join('');
-        // Only patch if selection changed (avoids flicker from full rebuild)
         var curSelected = ratingRow.querySelector('.selected');
         var curVal = curSelected ? curSelected.getAttribute('data-rating') : null;
-        if (curVal !== (myVoteForCard||null) || ratingRow.children.length !== 3) {
+        if (curVal !== (myVoteForCard||null) || ratingRow.children.length !== 5) {
           ratingRow.innerHTML = newRatingHtml;
         }
       } else {
-        var rLabel = {violation:'❌ 違規', normal:'👍 普通', great:'⭐ 超棒'};
+        var rLabel = {violation:'💀 拉完了', npc:'🤖 NPC', normal:'👤 人上人', great:'⭐ 頂級', goat:'🔥 夯爆了'};
         var voteText = myVoteForCard ? rLabel[myVoteForCard] : isSelf ? '（自己）' : '—';
         if (!ratingRow._patchedVoted) {
           ratingRow.innerHTML = '<div class="chaos-voted-label">你的評分：' + voteText + '</div>';
@@ -3472,15 +3810,22 @@ class UIController {
           var origPid = assignments[editorPid];
           var editor = players[editorPid]||{}, origAuth = players[origPid]||{};
           var orig = sentences[origPid]||'', mod = modifications[editorPid]||'';
-          // Tally votes for this card
-          var great = 0, normal = 0, violation = 0;
-          pids.forEach(function(vp) { var r = (votes[vp]||{})[editorPid]; if(r==='great')great++; else if(r==='normal')normal++; else if(r==='violation')violation++; });
+          // Tally votes for this card - all 5 tiers
+          var goat = 0, great = 0, normal = 0, npc = 0, violation = 0;
+          pids.forEach(function(vp) {
+            var r = (votes[vp]||{})[editorPid];
+            if(r==='goat') goat++; else if(r==='great') great++;
+            else if(r==='normal') normal++; else if(r==='npc') npc++;
+            else if(r==='violation') violation++;
+          });
           return '<div class="chaos-pair-card">' +
             '<div class="chaos-pair-meta"><span class="chaos-pair-editor">改寫者：'+Utils.escapeHtml(editor.name||'???')+'</span></div>' +
             '<div class="chaos-card-original"><span class="chaos-card-label">原句（'+Utils.escapeHtml(origAuth.name||'???')+'）</span><div class="chaos-card-text">'+Utils.escapeHtml(orig)+'</div></div>' +
             '<div class="chaos-card-arrow">↓</div>' +
             '<div class="chaos-card-modified"><div class="chaos-card-text chaos-card-text-mod">'+Utils.escapeHtml(mod)+'</div></div>' +
-            '<div class="chaos-pair-tally">⭐×'+great+'　👍×'+normal+'　❌×'+violation+'</div>' +
+            '<div class="chaos-pair-tally">' +
+              (goat?'🔥×'+goat+'　':'')+(great?'⭐×'+great+'　':'')+(normal?'👤×'+normal+'　':'')+(npc?'🤖×'+npc+'　':'')+(violation?'💀×'+violation:'') +
+            '</div>' +
           '</div>';
         }).join('') + '</div>';
       cont.innerHTML = lbHtml + pairsHtml;
@@ -3854,20 +4199,129 @@ class UIController {
     const amSeer   = myRole === 'seer';
     const amWitch  = myRole === 'witch';
     const amHunter = myRole === 'hunter';
+    const amGD     = myRole === 'gravedigger';
     const isActive = NIGHT_ACTIVE_ROLES.has(myRole);
     const amDone   = !!(g.nightConfirmed || {})[myId];
     const amCupid  = myRole === 'cupid';
-    const isPassive = !isActive && !amHunter && !amCupid; // villager, bomber, knight
+    // gravedigger counts as needing action from round 2 onwards
+    const gdNeedsAction = amGD && g.wwRound >= 2;
+    const isPassive = !isActive && !amHunter && !amCupid && !amGD; // villager, bomber, knight
 
     // Each player sees only their own panel simultaneously
-    this._show('ww-night-wolf',    amWolf   && !amDone);
-    this._show('ww-night-seer',    amSeer   && !amDone);
-    this._show('ww-night-witch',   amWitch  && !amDone);
-    this._show('ww-night-hunter',  amHunter && !amDone);
-    this._show('ww-night-cupid',   amCupid  && !amDone && !g.cupidDone);
-    this._show('ww-night-passive', isPassive && !amDone);
-    // Show waiting scene: active role done, OR passive/hunter/cupid confirmed
-    this._show('ww-night-waiting', (isActive && amDone) || ((isPassive || amHunter || amCupid) && amDone));
+    this._show('ww-night-wolf',        amWolf   && !amDone);
+    this._show('ww-night-seer',        amSeer   && !amDone);
+    this._show('ww-night-witch',       amWitch  && !amDone);
+    this._show('ww-night-hunter',      amHunter && !amDone);
+    this._show('ww-night-cupid',       amCupid  && !amDone && !g.cupidDone);
+    this._show('ww-night-gravedigger', amGD && !amDone);
+    this._show('ww-night-passive',     isPassive && !amDone);
+    // Show waiting scene when done
+    this._show('ww-night-waiting',
+      (isActive && amDone) ||
+      ((isPassive || amHunter || amCupid) && amDone) ||
+      (amGD && amDone)
+    );
+
+    // ── Gravedigger panel ─────────────────────────────────
+    if (amGD && !amDone) {
+      var gdHint = document.getElementById('gravedigger-night-hint');
+      var gdLog  = document.getElementById('gravedigger-log-display');
+      var logArr = Array.isArray(g.gravediggerLog) ? g.gravediggerLog
+                 : Object.values(g.gravediggerLog || {});
+      // Use a data-key to avoid rebuilding the DOM every render tick (fixes flicker)
+      var logKey = g.wwRound + ':' + logArr.length;
+      if (gdLog && gdLog.getAttribute('data-log-key') !== logKey) {
+        gdLog.setAttribute('data-log-key', logKey);
+        // Round 1: no info yet
+        if (g.wwRound <= 1) {
+          if (gdHint) gdHint.textContent = '第一夜尚無案卷可查…';
+          gdLog.innerHTML = '<div class="gd-no-info">第二夜起才會有記錄</div>';
+        } else {
+          if (gdHint) gdHint.textContent = '查閱昨日白天放逐記錄';
+          if (logArr.length === 0) {
+            gdLog.innerHTML = '<div class="gd-no-info">昨日無人被投票放逐</div>';
+          } else {
+            gdLog.innerHTML = logArr.map(function(entry, i) {
+              var isLatest = i === logArr.length - 1;
+              var teamCls = entry.team === 'wolf'   ? 'gd-wolf' :
+                            entry.team === 'bomber' ? 'gd-bomber' :
+                            entry.team === 'third'  ? 'gd-third' : 'gd-village';
+              var teamLabel = entry.team === 'wolf'   ? '狼人陣營' :
+                              entry.team === 'bomber' ? '第三方' :
+                              entry.team === 'third'  ? '第三方' : '村民陣營';
+              return '<div class="gd-entry' + (isLatest ? ' gd-latest' : '') + '">' +
+                '<span class="gd-round">第 ' + entry.round + ' 夜前</span>' +
+                '<span class="gd-name">' + Utils.escapeHtml(entry.name || '???') + '</span>' +
+                '<span class="gd-team ' + teamCls + '">' + teamLabel + '</span>' +
+              '</div>';
+            }).join('');
+          }
+        }
+      }
+      // else: key unchanged → DOM is already correct, skip to avoid flicker
+
+      // Gravedigger ghost game toy
+      var gdToy = document.getElementById('night-toy-gravedigger');
+      if (gdToy && gdToy.getAttribute('data-init') !== '1') {
+        gdToy.setAttribute('data-init', '1');
+        gdToy.innerHTML =
+          '<div class="toy-ghost-game">' +
+            '<div class="ghost-field" id="gd-ghost-field"></div>' +
+            '<div class="ghost-hud"><span id="ghost-banished">⚰️ 驅散：0</span><span id="ghost-escaped">👻 逃走：0</span></div>' +
+            '<div id="toy-msg-ghost">點擊幽靈驅散它！</div>' +
+          '</div>';
+
+        (function() {
+          var field    = gdToy.querySelector('#gd-ghost-field');
+          var banishEl = gdToy.querySelector('#ghost-banished');
+          var escEl    = gdToy.querySelector('#ghost-escaped');
+          var msgEl    = gdToy.querySelector('#toy-msg-ghost');
+          var banished = 0, escaped = 0;
+          var ghosts   = ['👻','💀','🕯️','☠️'];
+          var banishMsgs = ['驅散！','消散吧！','走開！','清靜了','成功！'];
+          var escapeMsgs = ['跑掉了…','太快了','下次一定'];
+
+          function spawnGhost() {
+            if (!field) return;
+            var fw = field.offsetWidth  || 200;
+            var fh = field.offsetHeight || 80;
+            var el = document.createElement('div');
+            el.className = 'ghost-sprite';
+            el.textContent = ghosts[Math.floor(Math.random() * ghosts.length)];
+            var lx = 8 + Math.random() * (fw - 44);
+            var ly = 4 + Math.random() * (fh - 36);
+            el.style.left = lx + 'px';
+            el.style.top  = ly + 'px';
+
+            var alive = true;
+            el.addEventListener('click', function(e) {
+              if (!alive) return;
+              e.stopPropagation();
+              alive = false;
+              el.style.animation = 'ghostBanish .45s ease forwards';
+              banished++;
+              if (banishEl) banishEl.textContent = '⚰️ 驅散：' + banished;
+              if (msgEl) msgEl.textContent = banishMsgs[banished % banishMsgs.length];
+              setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); spawnGhost(); }, 460);
+            });
+
+            field.appendChild(el);
+            var escTime = 1800 + Math.random() * 900;
+            setTimeout(function() {
+              if (!alive) return;
+              alive = false;
+              escaped++;
+              if (escEl) escEl.textContent = '👻 逃走：' + escaped;
+              if (msgEl) msgEl.textContent = escapeMsgs[escaped % escapeMsgs.length];
+              if (el.parentNode) el.parentNode.removeChild(el);
+              setTimeout(spawnGhost, 500);
+            }, escTime);
+          }
+          setTimeout(spawnGhost, 600);
+          setTimeout(spawnGhost, 1600);
+        })();
+      }
+    }
 
     // Cupid panel rendering
     if (amCupid && !amDone && !g.cupidDone) {
@@ -4184,7 +4638,35 @@ class UIController {
       this._setText('ww-wolf-vote-status', votedCount + ' / ' + wolves.length + ' 名狼人已選擇');
     }
 
-    // ── Seer panel ────────────────────────────────────────
+    // ── Seer result modal ─────────────────────────────────
+    // Show once when seer has just confirmed their check this round.
+    // Gate on a local flag so re-renders don't re-open it.
+    if (amSeer && g.seerCheckedThisRound && amDone) {
+      var seerModal  = document.getElementById('seer-result-modal');
+      // Only show if not already visible AND not yet acked by the user this round
+      if (seerModal && seerModal.classList.contains('hidden') && !seerModal._ackedRound) {
+        var checkedPid = g.seerCheckedThisRound;
+        var cp         = players[checkedPid] || {};
+        var result     = (g.seerResults || {})[checkedPid];
+        var isWolfResult = result === 'bad';
+        var glyphEl  = document.getElementById('seer-result-glyph');
+        var nameEl2  = document.getElementById('seer-result-name');
+        var verdictEl= document.getElementById('seer-result-verdict');
+        if (glyphEl)   glyphEl.textContent  = isWolfResult ? '🐺' : '✦';
+        if (nameEl2)   nameEl2.textContent  = cp.name || checkedPid || '???';
+        if (verdictEl) {
+          verdictEl.textContent  = isWolfResult ? '⚠️ 狼人陣營！' : '✦ 好人陣營';
+          verdictEl.className    = 'seer-result-verdict ' + (isWolfResult ? 'seer-bad' : 'seer-good');
+        }
+        seerModal.classList.remove('hidden');
+      }
+    } else if (!amDone) {
+      // Reset ack flag at start of new night so modal can show again next round
+      var sm = document.getElementById('seer-result-modal');
+      if (sm) { sm.classList.add('hidden'); sm._ackedRound = false; }
+    }
+
+    // ── Seer panel (grid + history) ───────────────────────
     if (amSeer && !amDone) {
       var seerTargets = Object.keys(g.alive||{}).filter(function(id) { return g.alive[id] && id !== myId; });
       var seerGrid = document.getElementById('ww-seer-grid');

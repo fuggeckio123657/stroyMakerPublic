@@ -97,7 +97,15 @@
       <div class="room-code-wrap">
         <span class="topbar-label">房間代碼</span>
         <span id="display-room-code" class="room-code-badge">------</span>
-        <button id="btn-copy-code" class="btn-icon" title="複製代碼">📋</button>
+        <button id="btn-copy-code" class="btn-copy-anim" title="複製代碼">
+        <span class="copy-icon-default">📋</span>
+        <svg class="copy-spinner-svg" viewBox="0 0 24 24" width="20" height="20" fill="none">
+          <circle cx="12" cy="12" r="9" stroke="rgba(255,255,255,0.12)" stroke-width="2.5"/>
+          <circle cx="12" cy="12" r="9" stroke="var(--gold2)" stroke-width="2.5" stroke-linecap="round"
+            stroke-dasharray="56.55" stroke-dashoffset="56.55" class="copy-arc"/>
+        </svg>
+        <span class="copy-done-check">✓</span>
+      </button>
       </div>
       <button id="btn-leave-room" class="btn btn-ghost btn-sm">← 離開</button>
     </div>
@@ -197,6 +205,8 @@
                 <div class="rc-counter"><button class="role-counter-btn" data-role="bomber" data-dir="-1">−</button><span id="ww-count-bomber" class="rc-num">0</span><button class="role-counter-btn" data-role="bomber" data-dir="1">+</button></div></div>
               <div class="role-row"><span class="rc-icon">💘</span><span class="rc-name">邱比特</span>
                 <div class="rc-counter"><button class="role-counter-btn" data-role="cupid" data-dir="-1">−</button><span id="ww-count-cupid" class="rc-num">0</span><button class="role-counter-btn" data-role="cupid" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">⚰️</span><span class="rc-name">守墓人</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="gravedigger" data-dir="-1">−</button><span id="ww-count-gravedigger" class="rc-num">0</span><button class="role-counter-btn" data-role="gravedigger" data-dir="1">+</button></div></div>
             </div>
           </div>
           <div class="form-group">
@@ -215,7 +225,7 @@
           <div class="form-row">
             <div class="form-group half">
               <label for="chaos-rounds">回合數</label>
-              <input type="number" id="chaos-rounds" value="5" min="2" max="15">
+              <input type="number" id="chaos-rounds" value="5" min="1" max="15">
             </div>
             <div class="form-group half">
               <label for="chaos-write-time">寫句子時限（秒）</label>
@@ -269,8 +279,6 @@
     </div>
   </div>
 </div>
-
-<!-- ══ GAME (Story Relay) ═══════════════════════════════════ -->
 <div id="screen-game" class="screen hidden">
   <div class="bg-noise"></div>
   <div class="game-wrap">
@@ -531,6 +539,22 @@
           <button id="btn-passive-done" class="btn btn-ghost">✓ 我已閉眼，確認等待</button>
         </div>
       </div>
+
+      <!-- Gravedigger night panel -->
+      <div id="ww-night-gravedigger" class="night-subpanel hidden">
+        <div class="night-header">
+          <div class="night-moon">⚰️</div>
+          <h2>守墓人翻閱案卷</h2>
+          <p class="night-hint" id="gravedigger-night-hint">查閱昨日白天放逐記錄…</p>
+        </div>
+        <div id="gravedigger-log-display" class="gravedigger-log-display"></div>
+        <div class="night-toy-wrap">
+          <div class="night-toy night-toy-gd" id="night-toy-gravedigger" title="驅散幽靈"></div>
+        </div>
+        <div class="night-footer">
+          <button id="btn-gravedigger-done" class="btn btn-ghost">✓ 已閱覽記錄，確認等待</button>
+        </div>
+      </div>
       <div class="night-panel-footer">
         <div id="ww-night-progress" class="night-progress-text">等待夜晚行動…</div>
       </div>
@@ -618,6 +642,17 @@
         </div>
         <p class="lover-notify-rule">⚠️ 若對方死亡，你將立刻殉情死亡（不可發動技能）。</p>
         <button id="btn-lover-ack" class="btn btn-primary">💕 我明白了</button>
+      </div>
+    </div>
+
+    <!-- Seer Result Modal — shown immediately after seer checks a player -->
+    <div id="seer-result-modal" class="seer-result-modal hidden">
+      <div class="seer-result-card">
+        <div class="seer-result-glyph" id="seer-result-glyph">🔮</div>
+        <div class="seer-result-label">查驗結果</div>
+        <div class="seer-result-name" id="seer-result-name">???</div>
+        <div class="seer-result-verdict" id="seer-result-verdict"></div>
+        <button id="btn-seer-result-ack" class="btn btn-primary" style="margin-top:16px">✓ 了解，閉眼等待</button>
       </div>
     </div>
 
@@ -715,9 +750,11 @@
       <div id="cvr-confirm-wrap" class="cvr-persistent"></div>
       <div id="cvr-progress" class="chaos-card-progress"></div>
       <div class="chaos-vr-legend">
-        <span class="vote-violation-label">❌ 違規 −2</span>
-        <span class="vote-normal-label">👍 普通 +1</span>
-        <span class="vote-great-label">⭐ 超棒 +4</span>
+        <span class="vote-violation-label">💀 拉完了 −500</span>
+        <span class="vote-npc-label">🤖 NPC −100</span>
+        <span class="vote-normal-label">👤 人上人 +100</span>
+        <span class="vote-great-label">⭐ 頂級 +300</span>
+        <span class="vote-goat-label">🔥 夯爆了 +500</span>
         <span class="vote-bonus-label">💫 最喜歡</span>
       </div>
       <div class="chaos-reactions-row" id="cvr-react-btns"></div>
@@ -746,6 +783,42 @@
   </div>
 </div>
 
+<!-- ══ FLOATING CHAT ═══════════════════════════════════════ -->
+<div id="floating-chat" class="floating-chat hidden">
+  <div class="fc-header" id="fc-header">
+    <span class="fc-title">💬 大廳聊天室</span>
+    <div class="fc-header-actions">
+      <span class="fc-online" id="fc-online-badge"></span>
+      <button class="fc-toggle-btn" id="fc-toggle-btn" title="收合">▼</button>
+      <button class="fc-close-btn" id="fc-close-btn" title="關閉">✕</button>
+    </div>
+  </div>
+  <div class="fc-body" id="fc-body">
+    <div id="fc-messages" class="fc-messages"></div>
+    <div class="fc-input-row">
+      <input type="text" id="fc-input" class="fc-field" placeholder="輸入訊息…" maxlength="100" autocomplete="off">
+      <button id="fc-send-btn" class="fc-send-btn">↑</button>
+    </div>
+  </div>
+</div>
+
+<!-- Chat open button (shown when chat is closed/hidden) -->
+<button id="fc-open-btn" class="fc-open-btn hidden" title="開啟聊天室">
+  💬
+  <span class="fc-unread-dot hidden" id="fc-unread-dot"></span>
+</button>
+
+<!-- ══ KICKED MODAL ═══════════════════════════════════════ -->
+<div id="kicked-modal" class="kicked-modal hidden">
+  <div class="kicked-card">
+    <div class="kicked-icon">🚫</div>
+    <h2 class="kicked-title">你被踢出房間</h2>
+    <p class="kicked-sub">主持人將你移出了這個房間。</p>
+    <button id="btn-kicked-ok" class="btn btn-primary" style="margin-top:18px;min-width:140px">返回首頁</button>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
 <script src="main.js"></script>
 </body>
 </html>
