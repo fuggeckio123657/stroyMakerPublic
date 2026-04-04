@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>派對遊戲室 ─ 多人即時遊戲</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;500;700;900&family=Noto+Sans+TC:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+</head>
+<body>
+
+<!-- ══ HOME ═══════════════════════════════════════════════ -->
+<div id="screen-home" class="screen active">
+  <div class="bg-noise"></div>
+  <div class="home-particles">
+    <span class="hp">📖</span><span class="hp">🐺</span><span class="hp">🔮</span>
+    <span class="hp">🧙</span><span class="hp">👑</span><span class="hp">🌙</span>
+    <span class="hp">🏹</span><span class="hp">⚔️</span>
+  </div>
+
+  <div class="home-center">
+
+    <!-- Hero branding -->
+    <div class="home-hero-block">
+      <div class="home-crown-ring">
+        <span class="home-crown-icon">🎮</span>
+      </div>
+      <h1 class="home-main-title">派對遊戲室</h1>
+      <p class="home-main-sub">PARTY GAME ROOM</p>
+      <div class="home-title-divider">
+        <span class="htd-line"></span>
+        <span class="htd-gem">✦</span>
+        <span class="htd-line"></span>
+      </div>
+    </div>
+
+    <!-- Game modes row -->
+    <div class="home-modes-row">
+      <div class="home-mode-pill">
+        <span class="hmp-icon">📖</span>
+        <div>
+          <div class="hmp-name">故事接龍</div>
+          <div class="hmp-desc">協作敘事 · 輪流創作</div>
+        </div>
+      </div>
+      <div class="home-mode-pill hmp-wolf">
+        <span class="hmp-icon">🐺</span>
+        <div>
+          <div class="hmp-name">狼人殺</div>
+          <div class="hmp-desc">推理對抗 · 陣營博弈</div>
+        </div>
+      </div>
+      <div class="home-mode-pill hmp-chaos">
+        <span class="hmp-icon">🎲</span>
+        <div>
+          <div class="hmp-name">規則混亂</div>
+          <div class="hmp-desc">創意改句 · 投票評分</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Form card -->
+    <div class="home-card-wrap">
+      <div class="home-card">
+        <div class="home-card-section">
+          <label class="home-field-label" for="input-name">玩家暱稱</label>
+          <input type="text" id="input-name" class="home-field" placeholder="輸入你的暱稱…" maxlength="20" autocomplete="off">
+        </div>
+        <button id="btn-create-room" class="home-btn-primary">✦ 建立新房間</button>
+        <div class="home-sep"><span>或加入現有房間</span></div>
+        <div class="home-join-row">
+          <input type="text" id="input-room-code" class="home-field home-code-field" placeholder="房間代碼" maxlength="6" autocomplete="off" style="text-transform:uppercase">
+          <button id="btn-join-room" class="home-btn-secondary">加入</button>
+        </div>
+        <!-- Loading bar — shown during async join/create -->
+        <div id="home-loading-bar" class="home-loading-bar hidden">
+          <div class="home-loading-track"><div class="home-loading-fill"></div></div>
+          <span class="home-loading-txt">處理中…</span>
+        </div>
+        <div id="home-error" class="error-msg hidden" style="margin-top:12px"></div>
+      </div>
+      <p class="home-fine-print">最多 16 人 · Firebase 即時連線 · 支援觀戰模式</p>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══ ROOM ════════════════════════════════════════════════ -->
+<div id="screen-room" class="screen hidden">
+  <div class="bg-noise"></div>
+  <div class="container wide">
+    <div class="room-topbar">
+      <div class="room-code-wrap">
+        <span class="topbar-label">房間代碼</span>
+        <span id="display-room-code" class="room-code-badge">------</span>
+        <button id="btn-copy-code" class="btn-icon" title="複製代碼">📋</button>
+      </div>
+      <button id="btn-leave-room" class="btn btn-ghost btn-sm">← 離開</button>
+    </div>
+    <div class="room-body">
+
+      <!-- Players panel -->
+      <div class="panel players-panel">
+        <div class="panel-header">
+          玩家列表
+          <span id="player-count" class="badge-count">0 / 12</span>
+        </div>
+        <ul id="players-list" class="players-list"></ul>
+        <!-- Voluntary spectator toggle -->
+        <div class="spec-toggle-wrap">
+          <button id="btn-toggle-spectator" class="btn btn-ghost btn-sm btn-full spec-toggle-btn">
+            👁 進入觀戰模式
+          </button>
+        </div>
+      </div>
+
+      <!-- Host settings panel -->
+      <div class="panel settings-panel hidden" id="settings-panel">
+        <div class="panel-header">遊戲設定 <span class="host-crown">👑 主持人</span></div>
+
+        <!-- Host spectator exit bar (shown when host enters spectator mode) -->
+        <div id="host-spec-exit-bar" class="host-spec-exit-bar hidden">
+          <span class="spec-info">👁 你目前在觀戰模式</span>
+          <button id="btn-host-leave-spec" class="btn-host-leave-spec">🎮 退出觀戰</button>
+        </div>
+
+        <!-- Room capacity -->
+        <div class="form-group form-inline-row">
+          <label for="select-max-players">房間人數上限</label>
+          <select id="select-max-players" class="select-compact">
+            <option value="8">8 人</option>
+            <option value="10">10 人</option>
+            <option value="12" selected>12 人</option>
+            <option value="14">14 人</option>
+            <option value="16">16 人</option>
+          </select>
+        </div>
+
+        <!-- Game Type Switcher -->
+        <div class="game-type-switcher">
+          <button class="game-type-btn active" data-type="story">📖 故事接龍</button>
+          <button class="game-type-btn" data-type="werewolf">🐺 狼人殺</button>
+          <button class="game-type-btn" data-type="chaos">🎲 規則混亂</button>
+        </div>
+
+        <!-- Story Settings -->
+        <div id="story-settings">
+          <div class="form-group">
+            <label>遊戲模式</label>
+            <div class="radio-group">
+              <label class="radio-label">
+                <input type="radio" name="game-mode" value="round" checked>
+                <span class="radio-box"></span>回合制（全員鎖定後換輪）
+              </label>
+              <label class="radio-label">
+                <input type="radio" name="game-mode" value="time">
+                <span class="radio-box"></span>計時制（倒數結束自動換輪）
+              </label>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group half">
+              <label for="input-rounds">回合數</label>
+              <input type="number" id="input-rounds" value="2" min="1" max="10">
+            </div>
+            <div class="form-group half hidden" id="time-setting">
+              <label for="input-turn-time">每輪秒數</label>
+              <input type="number" id="input-turn-time" value="90" min="15" max="300">
+            </div>
+          </div>
+          <p class="round-hint">一回合 = 每位玩家輪流寫完所有故事一遍</p>
+          <button id="btn-start-game" class="btn btn-primary btn-full">開始遊戲 →</button>
+        </div>
+
+        <!-- Werewolf Settings -->
+        <div id="ww-settings" class="hidden">
+          <div class="ww-role-config">
+            <div class="role-config-title">職業設定 <span class="role-config-hint">（村民自動補齊）</span></div>
+            <div class="role-config-grid">
+              <div class="role-row wolf-role"><span class="rc-icon">🐺</span><span class="rc-name">狼人</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="wolf" data-dir="-1">−</button><span id="ww-count-wolf" class="rc-num">2</span><button class="role-counter-btn" data-role="wolf" data-dir="1">+</button></div></div>
+              <div class="role-row wolf-role"><span class="rc-icon">👑</span><span class="rc-name">狼王</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="wolfking" data-dir="-1">−</button><span id="ww-count-wolfking" class="rc-num">0</span><button class="role-counter-btn" data-role="wolfking" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">🔮</span><span class="rc-name">預言家</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="seer" data-dir="-1">−</button><span id="ww-count-seer" class="rc-num">1</span><button class="role-counter-btn" data-role="seer" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">🧙</span><span class="rc-name">女巫</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="witch" data-dir="-1">−</button><span id="ww-count-witch" class="rc-num">1</span><button class="role-counter-btn" data-role="witch" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">🏹</span><span class="rc-name">獵人</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="hunter" data-dir="-1">−</button><span id="ww-count-hunter" class="rc-num">1</span><button class="role-counter-btn" data-role="hunter" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">⚔️</span><span class="rc-name">騎士</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="knight" data-dir="-1">−</button><span id="ww-count-knight" class="rc-num">0</span><button class="role-counter-btn" data-role="knight" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">💣</span><span class="rc-name">炸彈客</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="bomber" data-dir="-1">−</button><span id="ww-count-bomber" class="rc-num">0</span><button class="role-counter-btn" data-role="bomber" data-dir="1">+</button></div></div>
+              <div class="role-row"><span class="rc-icon">💘</span><span class="rc-name">邱比特</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="cupid" data-dir="-1">−</button><span id="ww-count-cupid" class="rc-num">0</span><button class="role-counter-btn" data-role="cupid" data-dir="1">+</button></div></div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="ww-night-time">夜晚行動時限（秒）</label>
+            <input type="number" id="ww-night-time" value="30" min="15" max="90">
+          </div>
+          <div class="form-group">
+            <label for="ww-vote-time">投票計時時限（秒）</label>
+            <input type="number" id="ww-vote-time" value="60" min="20" max="180">
+          </div>
+          <button id="btn-start-ww" class="btn btn-primary btn-full ww-start-btn">開始狼人殺 🐺</button>
+        </div>
+
+        <!-- Chaos Settings -->
+        <div id="chaos-settings" class="hidden">
+          <div class="form-row">
+            <div class="form-group half">
+              <label for="chaos-rounds">回合數</label>
+              <input type="number" id="chaos-rounds" value="5" min="2" max="15">
+            </div>
+            <div class="form-group half">
+              <label for="chaos-write-time">寫句子時限（秒）</label>
+              <input type="number" id="chaos-write-time" value="60" min="20" max="180">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group half">
+              <label for="chaos-modify-time">修改時限（秒）</label>
+              <input type="number" id="chaos-modify-time" value="60" min="20" max="180">
+            </div>
+            <div class="form-group half">
+              <label for="chaos-vote-time">每張投票時限（秒）</label>
+              <input type="number" id="chaos-vote-time" value="20" min="10" max="60">
+            </div>
+          </div>
+          <p class="round-hint">每回合：寫句子 → 抽規則 → 修改別人的句子 → 評分投票</p>
+          <button id="btn-start-chaos" class="btn btn-primary btn-full">開始規則混亂 🎲</button>
+        </div>
+
+        <div id="room-error" class="error-msg hidden"></div>
+      </div>
+
+      <!-- Non-host waiting panel (non-spectator) -->
+      <div class="panel waiting-panel hidden" id="waiting-panel">
+        <div class="panel-header">遊戲設定 <span class="host-crown">👁 唯讀</span></div>
+        <div id="settings-preview" class="settings-preview">
+          <div class="preview-row"><span class="preview-label">遊戲模式</span><span class="preview-val">等待主持人設定…</span></div>
+        </div>
+        <div class="waiting-footer">
+          <div class="spinner"></div>
+          <p class="waiting-text">等待主持人開始遊戲</p>
+        </div>
+      </div>
+
+      <!-- Spectator lobby panel (shown when player enters spectator mode) -->
+      <div class="panel spectator-lobby-panel hidden" id="spectator-lobby-panel">
+        <div class="spec-lobby-header">
+          <span class="spec-lobby-badge">👁 觀戰</span>
+          <span class="spec-lobby-title">你目前在觀戰模式</span>
+        </div>
+        <div class="spec-lobby-body">
+          <p style="font-size:.82rem;color:var(--txt1);margin:0 0 8px">你不會被分配遊戲身份，可隨時退出觀戰重新加入。</p>
+          <div id="spectator-lobby-content"></div>
+        </div>
+        <div class="spec-lobby-footer">
+          <button id="btn-leave-spec" class="btn-leave-spec">🎮 退出觀戰，回到玩家列表</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ══ GAME (Story Relay) ═══════════════════════════════════ -->
+<div id="screen-game" class="screen hidden">
+  <div class="bg-noise"></div>
+  <div class="game-wrap">
+
+    <!-- Floating capsule header -->
+    <header class="game-header">
+      <div class="game-meta">
+        <span id="game-round-label" class="round-label">第 1 / 1 回合</span>
+        <span id="game-turn-label"  class="turn-label">第 1 / 1 輪</span>
+        <span id="game-phase-badge" class="phase-badge writing">寫作中</span>
+      </div>
+      <div class="game-header-right">
+        <div id="header-lock-info" class="lock-info hidden">
+          <span id="lock-count" class="lock-count-text">已鎖定 0 / 0</span>
+        </div>
+        <div id="game-timer" class="game-timer hidden">
+          <div class="timer-ring-wrap">
+            <svg class="timer-ring" viewBox="0 0 36 36">
+              <circle class="timer-ring-bg" cx="18" cy="18" r="15"/>
+              <circle class="timer-ring-fill" id="timer-ring-fill" cx="18" cy="18" r="15"
+                stroke-dasharray="94.25" stroke-dashoffset="0"/>
+            </svg>
+            <span id="timer-value" class="timer-value">90</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- ── Writing phase ─────────────────────────────────── -->
+    <div id="phase-writing" class="hidden game-phase-writing">
+      <!-- Previous segment context -->
+      <div class="manuscript-context" id="context-wrap">
+        <div class="manuscript-context-label">
+          <span class="ctx-quill">✦</span> 上一段故事
+        </div>
+        <div id="story-context-text" class="manuscript-text"></div>
+      </div>
+
+      <!-- Writing card -->
+      <div class="writing-card" id="writing-card">
+        <div class="writing-card-top">
+          <span class="writing-card-label">✍ 你的段落</span>
+          <div class="char-ring-wrap">
+            <svg class="char-ring" viewBox="0 0 32 32">
+              <circle class="char-ring-bg"   cx="16" cy="16" r="13"/>
+              <circle class="char-ring-fill" id="char-ring-fill" cx="16" cy="16" r="13"
+                stroke-dasharray="81.7" stroke-dashoffset="81.7"/>
+            </svg>
+            <span id="char-count" class="char-count-val">0</span>
+          </div>
+        </div>
+        <textarea id="story-input" class="story-textarea"
+          placeholder="繼續這個故事…" maxlength="500" rows="5"></textarea>
+        <div class="writing-actions">
+          <button id="btn-lock" class="btn btn-primary btn-lock-story">🔒 鎖定送出</button>
+        </div>
+      </div>
+
+      <!-- Locked waiting state — unlock button lives here -->
+      <div id="waiting-locked" class="waiting-locked-panel hidden">
+        <div class="waiting-locked-inner">
+          <div class="wl-lock-icon">🔐</div>
+          <div class="wl-text">
+            <div class="wl-title">已鎖定送出</div>
+            <div class="wl-sub">靜候其他人寫完…</div>
+          </div>
+          <div class="wl-dots"><span></span><span></span><span></span></div>
+        </div>
+        <button id="btn-unlock" class="btn btn-ghost btn-unlock-locked">🔓 解鎖修改</button>
+      </div>
+    </div>
+
+    <!-- ── Spectating phase ──────────────────────────────── -->
+    <div id="phase-spectating" class="hidden">
+      <div class="spec-banner">
+        <div class="spec-banner-left">
+          <div class="spec-banner-glyph">👁</div>
+          <div>
+            <div id="spec-round" class="spec-round-label">觀戰中</div>
+            <div id="spec-lock-status" class="spec-lock-badge">0 / 0 人已鎖定</div>
+          </div>
+        </div>
+      </div>
+      <div id="spec-players-grid" class="spec-players-grid"></div>
+    </div>
+
+    <!-- ── Revealing phase ───────────────────────────────── -->
+    <div id="phase-revealing" class="hidden">
+      <div class="reveal-header-bar">
+        <div class="reveal-header-title">
+          <span class="reveal-quill">📖</span>
+          <span>故事揭曉時刻</span>
+        </div>
+        <div class="reveal-progress-pill">
+          <div class="reveal-progress-bar"><div id="reveal-progress-fill" class="reveal-progress-fill"></div></div>
+          <span id="reveal-subtitle" class="reveal-subtitle-text">準備揭示…</span>
+        </div>
+      </div>
+
+      <div id="reveal-stories" class="reveal-stories-list"></div>
+
+      <div class="reveal-action-bar">
+        <button id="btn-reveal-next" class="btn btn-primary hidden">下一段 ›</button>
+        <p id="reveal-watching-text" class="reveal-watch-hint hidden">等待主持人揭示下一段…</p>
+        <button id="btn-reveal-done" class="btn btn-gold hidden">✦ 完整展示</button>
+      </div>
+    </div>
+
+    <!-- ── Finished phase ────────────────────────────────── -->
+    <div id="phase-finished" class="hidden">
+      <div class="finished-hero">
+        <div class="finished-confetti">🎉</div>
+        <h2 class="finished-title">故事完結！</h2>
+        <p class="finished-sub">感謝所有人共同創作的精彩故事</p>
+      </div>
+      <div id="final-stories" class="final-stories-list"></div>
+      <div class="finished-actions">
+        <button id="btn-return-lobby" class="btn btn-ghost">← 返回大廳</button>
+      </div>
+    </div>
+
+  </div><!-- /game-wrap -->
+</div>
+
+<!-- ══ WW GAME ══════════════════════════════════════════════ -->
+<div id="screen-ww-game" class="screen hidden">
+  <div class="bg-noise"></div>
+  <div class="ww-wrap">
+
+    <div class="ww-header">
+      <div class="ww-header-left">
+        <span id="ww-phase-label" class="ww-phase-label">身份確認</span>
+        <span id="ww-round-label" class="ww-round-label"></span>
+      </div>
+      <div id="ww-night-timer" class="ww-night-timer hidden">⏱ <span id="ww-timer-val">30</span>s</div>
+      <div id="ww-alive-count" class="ww-alive-badge">👥 0 存活</div>
+    </div>
+
+    <!-- Spectator overlay (replaces all panels when viewing as spectator) -->
+    <div id="ww-spectator-overlay" class="ww-spectator-overlay hidden">
+      <div id="ww-spectator-content" class="spectator-content"></div>
+    </div>
+
+    <!-- Dead player overlay (replaces all panels when player has died in-game) -->
+    <div id="ww-dead-overlay" class="ww-spectator-overlay ww-dead-overlay hidden">
+      <div id="dead-host-bar" class="dead-host-bar hidden"></div>
+      <div id="ww-dead-content" class="spectator-content"></div>
+    </div>
+
+    <!-- Role Reveal -->
+    <div id="ww-panel-role-reveal" class="ww-panel hidden">
+      <div class="role-reveal-pre">你的身份是</div>
+      <div id="ww-role-card" class="role-card">
+        <div id="ww-role-icon"  class="role-icon">👨‍🌾</div>
+        <div id="ww-role-name"  class="role-name">村民</div>
+        <div id="ww-role-team"  class="role-team">村民陣營</div>
+        <div id="ww-role-desc"  class="role-desc-txt"></div>
+      </div>
+      <div id="ww-wolf-teammates" class="wolf-teammates hidden">
+        <p class="teammates-label">⚠ 你的狼人同伴：</p>
+        <div id="ww-teammates-list" class="teammates-list"></div>
+      </div>
+      <div class="role-reveal-footer">
+        <button id="btn-ww-start-night" class="btn btn-primary hidden">🌙 所有人已確認，開始夜晚</button>
+        <p id="ww-night-starts" class="ww-waiting-hint">仔細記住你的身份，等待主持人開始遊戲…</p>
+      </div>
+    </div>
+
+    <!-- Night -->
+    <div id="ww-panel-night" class="ww-panel hidden">
+      <div class="night-status-bar">
+        <span id="ww-night-step-label" class="night-step-label">請完成你的夜晚行動</span>
+        <span id="ww-night-progress" class="night-progress-badge"></span>
+      </div>
+      <div id="ww-night-wolf" class="night-subpanel hidden">
+        <div class="night-header"><div class="night-moon">🐺</div><h2>狼人請睜眼</h2>
+          <p class="night-hint">選擇今晚的目標——全員同意同一人時自動確認</p></div>
+        <div id="ww-wolf-vote-grid" class="player-vote-grid"></div>
+        <div class="night-footer">
+          <div id="ww-wolf-vote-status" class="vote-status-text"></div>
+          <button id="btn-wolf-confirm" class="btn btn-danger hidden">✓ 確認獵殺</button>
+        </div>
+      </div>
+      <div id="ww-night-seer" class="night-subpanel hidden">
+        <div class="night-header"><div class="night-moon">🔮</div><h2>預言家請睜眼</h2>
+          <p class="night-hint">點選一名玩家進行查驗，得知其陣營</p></div>
+        <div id="ww-seer-grid" class="player-vote-grid"></div>
+        <div id="ww-seer-history" class="seer-history"></div>
+      </div>
+      <div id="ww-night-witch" class="night-subpanel hidden">
+        <div class="night-header"><div class="night-moon">🧙</div><h2>女巫請睜眼</h2></div>
+        <div id="ww-witch-killed" class="witch-killed-card"></div>
+        <div class="witch-action-section">
+          <button id="btn-witch-save" class="btn btn-success">💊 使用解藥救人</button>
+        </div>
+        <div class="witch-action-section">
+          <div class="witch-poison-label">🧪 使用毒藥毒殺（選擇目標）：</div>
+          <div id="ww-witch-poison-grid" class="player-vote-grid small"></div>
+        </div>
+        <div class="witch-action-section">
+          <button id="btn-witch-pass" class="btn btn-ghost">不使用任何藥水，天亮</button>
+        </div>
+      </div>
+      <div id="ww-night-hunter" class="night-subpanel hidden">
+        <div class="night-header"><div class="night-moon">🏹</div><h2>獵人，請閉上眼睛</h2>
+          <p class="night-hint">你的技能在死後才能發動，今晚請靜靜休息</p></div>
+        <div class="night-toy-wrap">
+          <div class="night-toy" id="night-toy-hunter" data-toy-role="hunter" title="點我互動">
+          </div>
+        </div>
+        <div class="night-footer">
+          <button id="btn-hunter-pass" class="btn btn-ghost">✓ 我已閉眼，確認等待</button>
+        </div>
+      </div>
+      <!-- Cupid panel (round 1 only) -->
+      <div id="ww-night-cupid" class="night-subpanel hidden">
+        <div class="night-header">
+          <div class="night-moon">💘</div><h2>邱比特請睜眼</h2>
+          <p class="night-hint">選擇兩位玩家設定為情侶（可包含自己），選好後確認射箭。技能使用前每晚均可行動。</p>
+        </div>
+        <div id="ww-cupid-slots" class="cupid-slots">
+          <div class="cupid-slot" id="cupid-slot-0"><span class="cupid-slot-label">情侶 A</span><span class="cupid-slot-name" id="cupid-slot-name-0">—</span></div>
+          <div class="cupid-heart">💕</div>
+          <div class="cupid-slot" id="cupid-slot-1"><span class="cupid-slot-label">情侶 B</span><span class="cupid-slot-name" id="cupid-slot-name-1">—</span></div>
+        </div>
+        <div id="ww-cupid-grid" class="player-vote-grid"></div>
+        <div class="night-footer">
+          <button id="btn-cupid-confirm" class="btn btn-primary" disabled>💘 射箭！確認這對情侶</button>
+        </div>
+      </div>
+      <div id="ww-night-waiting" class="night-subpanel hidden">
+        <div class="night-wait-scene">
+          <div class="stars"><span>✦</span><span>✦</span><span>✦</span><span>✦</span><span>✦</span></div>
+          <div class="night-moon-big">🌙</div>
+          <p class="night-wait-hint">請閉上眼睛，靜靜等待…</p>
+        </div>
+      </div>
+      <!-- Passive player night panel (villager/bomber/knight) -->
+      <div id="ww-night-passive" class="night-subpanel hidden">
+        <div class="night-header">
+          <div class="night-moon" id="passive-role-icon">🏘️</div>
+          <h2 id="passive-role-title">請閉眼等待</h2>
+          <p class="night-hint">夜晚降臨，靜靜等候黎明…</p>
+        </div>
+        <!-- Interactive night toy -->
+        <div class="night-toy-wrap">
+          <div class="night-toy" id="night-toy" title="點我互動">
+            <div class="toy-scene" id="toy-scene">
+              <div class="toy-star ts1">✦</div><div class="toy-star ts2">✧</div>
+              <div class="toy-star ts3">✦</div><div class="toy-star ts4">✧</div>
+              <div class="toy-moon" id="toy-moon">🌕</div>
+              <div class="toy-cloud tc1">☁</div><div class="toy-cloud tc2">☁</div>
+            </div>
+            <div class="toy-msg" id="toy-msg">點擊月亮</div>
+          </div>
+        </div>
+        <div class="night-footer">
+          <button id="btn-passive-done" class="btn btn-ghost">✓ 我已閉眼，確認等待</button>
+        </div>
+      </div>
+      <div class="night-panel-footer">
+        <div id="ww-night-progress" class="night-progress-text">等待夜晚行動…</div>
+      </div>
+    </div>
+
+    <!-- Day Announce -->
+    <div id="ww-panel-day-announce" class="ww-panel hidden">
+      <div class="day-dawn"><div class="dawn-icon">🌅</div><h2>天亮了</h2></div>
+      <div id="ww-announce-content" class="announce-content"></div>
+      <div class="announce-footer">
+        <button id="btn-ww-start-discuss" class="btn btn-primary hidden">💬 開始討論</button>
+        <p id="ww-waiting-discuss" class="ww-waiting-hint hidden">等待主持人開始討論…</p>
+      </div>
+    </div>
+
+    <!-- Day Discuss -->
+    <div id="ww-panel-day-discuss" class="ww-panel hidden">
+      <div class="discuss-header">
+        <h2>💬 討論時間</h2>
+        <div id="ww-ready-count" class="ready-count-badge">0 / 0</div>
+      </div>
+      <!-- Public knight reveal/challenge banner — visible to all -->
+      <div id="knight-public-banner" class="knight-public-banner hidden"></div>
+      <div id="ww-alive-players-list" class="discuss-player-list"></div>
+      <div class="discuss-actions">
+        <button id="btn-ww-ready" class="btn btn-primary">✋ 我準備好了</button>
+        <button id="btn-knight-reveal" class="btn btn-warning hidden">⚔️ 亮牌！我是騎士（亮牌後可發起決鬥）</button>
+        <div id="knight-revealed-badge" class="knight-revealed-badge hidden">⚔️ 身份已公開 — 點選玩家旁的決鬥按鈕挑戰</div>
+        <button id="btn-host-force-vote" class="btn btn-secondary btn-sm hidden">⚡ 強制進入投票</button>
+      </div>
+      <div id="ww-discuss-error" class="error-msg hidden"></div>
+    </div>
+
+    <!-- Vote -->
+    <div id="ww-panel-vote" class="ww-panel hidden">
+      <div class="vote-header">
+        <h2>🗳️ 投票放逐</h2>
+        <div class="vote-header-row">
+          <div id="ww-vote-timer" class="vote-countdown">⏱ <span id="ww-vote-time-left">--</span>s</div>
+          <div id="ww-vote-count" class="ready-count-badge">0 / 0</div>
+        </div>
+        <div id="ww-vote-bar-wrap" class="vote-timer-bar-wrap"><div id="ww-vote-bar" class="vote-timer-bar"></div></div>
+        <p class="vote-hint">選擇目標後按「鎖定」確認。鎖定前可隨時更換。</p>
+      </div>
+      <div id="ww-vote-grid" class="player-vote-grid vote-mode"></div>
+      <div id="vote-abstain-area" class="vote-abstain-area">
+        <button id="btn-vote-abstain" class="btn vote-abstain-btn">棄票（不投任何人）</button>
+      </div>
+      <div class="vote-lock-row">
+        <button id="btn-vote-lock" class="btn btn-primary vote-lock-btn hidden">🔒 確認鎖定投票</button>
+        <button id="btn-vote-unlock" class="btn btn-ghost vote-lock-btn hidden">🔓 解除鎖定（重新選擇）</button>
+      </div>
+    </div>
+
+    <!-- Vote Result -->
+    <div id="ww-panel-vote-result" class="ww-panel hidden">
+      <div id="ww-vote-result-content" class="vote-result-content"></div>
+      <div class="vote-result-footer"><div class="spinner"></div><span id="vote-result-footer-text">即將進入夜晚…</span></div>
+    </div>
+
+    <!-- Special — hunter/wolfking public ability panel, fully rebuilt by JS -->
+    <div id="ww-panel-special" class="ww-panel hidden"></div>
+
+    <!-- End -->
+    <div id="ww-panel-end" class="ww-panel hidden">
+      <div id="ww-end-banner" class="end-banner"></div>
+      <div id="ww-role-reveal-list" class="role-reveal-list"></div>
+      <div class="ww-end-footer">
+        <button id="btn-ww-back-lobby" class="btn btn-ghost">← 返回房間大廳</button>
+      </div>
+    </div>
+
+    <!-- Lover Notification Modal — shown as overlay to each lover once paired -->
+    <div id="lover-notify-modal" class="lover-notify-modal hidden">
+      <div class="lover-notify-card">
+        <div class="lover-notify-hearts">💘</div>
+        <h2 class="lover-notify-title">你被邱比特的箭射中了！</h2>
+        <p class="lover-notify-sub">你與另一位玩家成為情侶，命運從此相連。</p>
+        <div class="lover-partner-row">
+          <div class="lover-partner-avatar" id="lover-partner-avatar">?</div>
+          <div class="lover-partner-info">
+            <div class="lover-partner-label">你的情侶是</div>
+            <div class="lover-partner-name" id="lover-partner-name">???</div>
+          </div>
+        </div>
+        <p class="lover-notify-rule">⚠️ 若對方死亡，你將立刻殉情死亡（不可發動技能）。</p>
+        <button id="btn-lover-ack" class="btn btn-primary">💕 我明白了</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══ CHAOS GAME ════════════════════════════════════════ -->
+<div id="screen-chaos-game" class="screen hidden">
+  <div class="bg-noise"></div>
+  <div class="chaos-wrap">
+
+    <!-- Spectator overlay -->
+    <div id="chaos-spectator-overlay" class="ww-spectator-overlay hidden">
+      <div class="spec-badge">👁 觀戰模式</div>
+      <div id="chaos-spectator-content" class="chaos-spectator-content"></div>
+    </div>
+
+    <!-- Header -->
+    <header class="chaos-header">
+      <span id="chaos-header-info" class="chaos-header-info">規則混亂</span>
+      <div id="chaos-timer-wrap" class="chaos-timer-wrap hidden">
+        <span class="chaos-timer-label">剩餘</span>
+        <span id="chaos-timer-val" class="chaos-timer-val">60</span>
+        <span class="chaos-timer-label">秒</span>
+      </div>
+    </header>
+
+    <!-- WRITE SENTENCE -->
+    <div id="chaos-panel-write-sentence" class="chaos-panel hidden">
+      <div class="chaos-phase-title">✏️ 寫下你的初始句子</div>
+      <div class="chaos-phase-hint">可以是任何內容：敘述句、廢話、奇怪的話都行</div>
+      <div class="chaos-input-group">
+        <label class="chaos-label">📝 你的句子</label>
+        <textarea id="chaos-sentence-input" class="chaos-textarea" placeholder="例如：今天的天氣很好" rows="3" maxlength="200"></textarea>
+      </div>
+      <button id="btn-chaos-submit-sentence" class="btn btn-primary btn-full">✦ 提交句子</button>
+      <button id="btn-chaos-unsubmit-sentence" class="btn btn-ghost btn-full hidden" style="margin-top:6px">↩ 取消，重新編輯</button>
+      <div id="chaos-sentence-progress" class="chaos-progress-text">0 / 0 人已提交</div>
+    </div>
+
+    <!-- WRITE RULE -->
+    <div id="chaos-panel-write-rule" class="chaos-panel hidden">
+      <div class="chaos-phase-title">📜 為你的句子制定一條規則</div>
+      <div class="chaos-phase-hint">其他人要依照你的規則來修改別人的句子</div>
+      <div class="chaos-your-sentence-box">
+        <span class="chaos-label">你剛才寫的句子：</span>
+        <div class="chaos-original-text" id="chaos-your-sentence"></div>
+      </div>
+      <div class="chaos-input-group">
+        <label class="chaos-label">📜 你的規則</label>
+        <textarea id="chaos-rule-input" class="chaos-textarea" placeholder="例如：句子要像老師罵人" rows="2" maxlength="100"></textarea>
+      </div>
+      <button id="btn-chaos-submit-rule" class="btn btn-primary btn-full">✦ 提交規則</button>
+      <button id="btn-chaos-unsubmit-rule" class="btn btn-ghost btn-full hidden" style="margin-top:6px">↩ 取消，重新編輯</button>
+      <div id="chaos-rule-progress" class="chaos-progress-text">0 / 0 人已提交</div>
+    </div>
+
+    <!-- RULE REVEAL -->
+    <div id="chaos-panel-rule-reveal" class="chaos-panel hidden">
+      <div class="chaos-phase-title">🎲 本回合規則出爐！</div>
+      <div class="chaos-rule-reveal-card">
+        <div class="chaos-rule-big" id="chaos-rule-text"></div>
+      </div>
+      <div class="chaos-rule-author" id="chaos-rule-author"></div>
+    </div>
+
+    <!-- MODIFY -->
+    <div id="chaos-panel-modify" class="chaos-panel hidden">
+      <div class="chaos-phase-title">🔧 修改別人的句子，使其符合規則！</div>
+      <div class="chaos-modify-rule-box">
+        <span class="chaos-label">本回合規則：</span>
+        <span class="chaos-modify-rule-text" id="chaos-modify-rule"></span>
+      </div>
+      <div class="chaos-modify-original-box">
+        <span class="chaos-label">你收到的句子：</span>
+        <div class="chaos-original-text" id="chaos-modify-original"></div>
+      </div>
+      <div class="chaos-input-group">
+        <label class="chaos-label">✏️ 修改後的句子</label>
+        <textarea id="chaos-modify-input" class="chaos-textarea" placeholder="修改以符合規則…" rows="2" maxlength="300"></textarea>
+      </div>
+      <button id="btn-chaos-submit-modify" class="btn btn-primary btn-full">✦ 提交修改結果</button>
+      <button id="btn-chaos-unsubmit-modify" class="btn btn-ghost btn-full hidden" style="margin-top:6px">↩ 取消，重新修改</button>
+      <div id="chaos-modify-progress" class="chaos-progress-text">0 / 0 人已完成</div>
+    </div>
+
+    <!-- VOTE REVEAL: full-screen single card -->
+    <div id="chaos-panel-vote-reveal" class="chaos-panel hidden">
+      <div class="chaos-vote-header">
+        <span class="chaos-display-rule">規則：<span id="chaos-vr-rule"></span></span>
+        <span id="chaos-vote-card-counter" class="chaos-card-counter"></span>
+      </div>
+      <div id="chaos-vr-grid"></div>
+      <!-- Persistent elements outside the per-card rebuild zone -->
+      <div id="cvr-confirm-wrap" class="cvr-persistent"></div>
+      <div id="cvr-progress" class="chaos-card-progress"></div>
+      <div class="chaos-vr-legend">
+        <span class="vote-violation-label">❌ 違規 −2</span>
+        <span class="vote-normal-label">👍 普通 +1</span>
+        <span class="vote-great-label">⭐ 超棒 +4</span>
+        <span class="vote-bonus-label">💫 最喜歡</span>
+      </div>
+      <div class="chaos-reactions-row" id="cvr-react-btns"></div>
+      <div class="chaos-reactions-stage" id="cvr-react-stage"></div>
+    </div>
+
+    <!-- ROUND RESULT -->
+    <div id="chaos-panel-round-result" class="chaos-panel hidden">
+      <div class="chaos-phase-title">📊 本回合結果</div>
+      <div id="chaos-round-result-list" class="chaos-result-list"></div>
+      <button id="btn-chaos-next-round" class="btn btn-primary btn-full hidden" style="margin-top:12px">➡ 下一回合</button>
+    </div>
+
+    <!-- END -->
+    <div id="chaos-panel-end" class="chaos-panel hidden">
+      <div class="chaos-end-header">
+        <div class="chaos-end-trophy">🏆</div>
+        <div class="chaos-phase-title">最終排行榜</div>
+      </div>
+      <div id="chaos-end-list" class="chaos-result-list"></div>
+      <div id="chaos-end-badges" class="chaos-end-badges"></div>
+      <button id="btn-chaos-end-reveal" class="btn btn-secondary btn-full hidden" style="margin-top:12px">✦ 揭露下一個獎項</button>
+      <button id="btn-chaos-back-lobby" class="btn btn-ghost btn-full" style="margin-top:8px">← 返回大廳</button>
+    </div>
+
+  </div>
+</div>
+
+<script src="main.js"></script>
+</body>
+</html>
