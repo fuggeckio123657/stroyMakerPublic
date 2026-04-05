@@ -2571,3 +2571,130 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }
 .vote-npc-label  { color: #a78bfa; }
 .vote-goat-label { color: #fb923c; }
 
+
+/* ══════════════════════════════════════════════════════
+   FLOATING CHAT — ENHANCED MESSAGE UI (Fix 2)
+══════════════════════════════════════════════════════ */
+
+/* Override old flat styles */
+.fc-msg {
+  display: flex; align-items: flex-start; gap: 7px;
+  animation: seg-in .2s ease forwards;
+}
+.fc-msg-me { flex-direction: row-reverse; gap: 0; }
+
+/* Avatar circle for others */
+.fc-msg-avatar {
+  width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .75rem; font-weight: 800; color: #000;
+  margin-top: 2px;
+}
+
+/* Message body — others */
+.fc-msg-body {
+  display: flex; flex-direction: column; gap: 2px; max-width: 200px;
+}
+/* Message body — self (right-aligned) */
+.fc-msg-body-me {
+  display: flex; flex-direction: column; gap: 2px;
+  align-items: flex-end; max-width: 200px; width: 100%;
+}
+
+/* Meta row: name + time */
+.fc-msg-meta {
+  display: flex; align-items: center; gap: 5px;
+}
+.fc-msg-meta-right {
+  display: flex; align-items: center; gap: 5px; justify-content: flex-end;
+}
+.fc-msg-name {
+  font-size: .68rem; font-weight: 800; line-height: 1;
+}
+.fc-msg-name-me { color: var(--gold2) !important; }
+.fc-msg-time {
+  font-size: .6rem; color: var(--txt2); line-height: 1;
+}
+
+/* Bubble */
+.fc-msg-bubble {
+  font-size: .82rem; color: var(--txt0); line-height: 1.45;
+  background: rgba(255,255,255,.06);
+  border-radius: 4px 10px 10px 10px;
+  padding: 5px 10px; word-break: break-word;
+  border: 1px solid rgba(255,255,255,.05);
+}
+.fc-msg-bubble-me {
+  background: rgba(201,168,76,.13);
+  border-radius: 10px 4px 10px 10px;
+  border-color: rgba(201,168,76,.15);
+  text-align: right;
+}
+
+/* ══════════════════════════════════════════════════════
+   WITCH PANEL — WOLF TARGET REVEAL (Fix 3)
+══════════════════════════════════════════════════════ */
+.witch-kill-name-row {
+  display: flex; align-items: center; gap: 10px;
+  background: rgba(220,38,38,.08); border: 1px solid rgba(220,38,38,.25);
+  border-radius: 10px; padding: 8px 12px; margin: 6px 0;
+}
+.witch-target-avatar {
+  width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .9rem; font-weight: 800; color: #fff;
+  border: 2px solid rgba(220,38,38,.35);
+}
+.witch-kill-hint {
+  font-size: .75rem; color: rgba(252,165,165,.7); margin-top: 2px;
+}
+
+
+/* ══════════════════════════════════════════════════════
+   CHAOS END — DRAMATIC STEP REVEAL (Task 2)
+══════════════════════════════════════════════════════ */
+.chaos-end-waiting {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 32px 20px; color: var(--txt2); font-size: .9rem;
+}
+.chaos-end-wait-icon { font-size: 3rem; animation: float 2s ease-in-out infinite; }
+
+/* Newly revealed row — entrance animation */
+@keyframes endRevealIn {
+  from { opacity: 0; transform: translateY(18px) scale(.94); }
+  to   { opacity: 1; transform: none; }
+}
+.chaos-end-reveal-new {
+  animation: endRevealIn .5s cubic-bezier(.34,1.56,.64,1) forwards;
+}
+
+/* Rank-specific highlight */
+.chaos-end-first  { border: 1.5px solid rgba(251,191,36,.55) !important; background: rgba(251,191,36,.08) !important; }
+.chaos-end-second { border: 1.5px solid rgba(192,192,192,.45) !important; background: rgba(192,192,192,.06) !important; }
+.chaos-end-third  { border: 1.5px solid rgba(205,127,50,.4)  !important; background: rgba(205,127,50,.07)  !important; }
+
+/* Badge pop animation */
+@keyframes badgeReveal {
+  from { opacity: 0; transform: scale(.7) rotate(-6deg); }
+  to   { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+.chaos-badge-reveal {
+  animation: badgeReveal .45s cubic-bezier(.34,1.56,.64,1) forwards;
+}
+
+/* Round result — own total vs hidden */
+.chaos-round-lb-title {
+  font-size: .75rem; font-weight: 700; color: var(--txt2);
+  text-transform: uppercase; letter-spacing: .07em;
+  padding: 0 2px 8px; margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.cr-my-total {
+  font-size: .72rem; font-weight: 700; color: var(--gold2);
+  background: rgba(201,168,76,.12); border-radius: 8px; padding: 2px 8px;
+}
+.cr-hidden-total {
+  font-size: .72rem; color: var(--txt2); font-style: italic;
+  background: rgba(255,255,255,.04); border-radius: 8px; padding: 2px 8px;
+}
+

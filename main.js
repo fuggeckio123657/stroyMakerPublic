@@ -130,7 +130,17 @@ const Utils = {
   },
 
   avatarColor(name) {
-    const palette = ['#c9a84c','#4ac0a0','#9b85e8','#e07050','#60b0e8','#d4807a','#80c870','#c080c8'];
+    const palette = [
+      // Vivid / bright
+      '#e85d4a','#f0a500','#2ec4b6','#7b61ff','#ff6b9d','#00c896',
+      '#ff7f3f','#3a86ff','#ff006e','#8ecae6','#06d6a0','#ffd166',
+      // Mid-tone
+      '#c9a84c','#4ac0a0','#9b85e8','#e07050','#60b0e8','#80c870',
+      '#c080c8','#d4807a','#5ba4cf','#e8845e','#7ec8a4','#b088d8',
+      // Dark / moody
+      '#7c4daa','#1a6b8a','#8b3a3a','#2d6a4f','#4a4a8a','#7a5c2a',
+      '#5c2d6e','#1b5e5e','#6b4226','#3d3d7a','#4d6b2a','#7a2d5c',
+    ];
     let h = 0;
     for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) & 0xffff;
     return palette[h % palette.length];
@@ -349,8 +359,10 @@ class FirebaseTransport {
     });
     this.ref('rooms/' + code + '/players/' + hostId).onDisconnect().remove();
     this.ref('rooms/' + code + '/info/host').onDisconnect().set(null);
-    // Host-alone case: if host closes browser and is the only player, delete room server-side
-    this.ref('rooms/' + code).onDisconnect().remove();
+    // NOTE: We intentionally do NOT set rooms/<code>.onDisconnect().remove() here.
+    // Doing so causes the entire room to be deleted when the host disconnects, which
+    // triggers the kick listener for all other players.
+    // Room cleanup is handled by _watchRoomEmpty (watches /players child_removed).
     this._registerRoomCleanup(code, hostId);
   }
 
@@ -359,9 +371,23 @@ class FirebaseTransport {
       name, joinedAt: Date.now(), isSpectator: !!isSpectator,
     });
     this.ref('rooms/' + code + '/players/' + pid).onDisconnect().remove();
-    // Cancel the room-level onDisconnect that host set (room is no longer host-only)
-    this.ref('rooms/' + code).onDisconnect().cancel().catch(() => {});
     this._registerRoomCleanup(code, pid);
+  }
+
+  // ── Explicit kick (host action only) ─────────────────
+  // Write a dedicated /kicked/<pid> node instead of removing the player node directly.
+  // Players watch this path; it never fires due to disconnect/reconnect.
+  async kickPlayer(code, pid) {
+    await this.ref('rooms/' + code + '/kicked/' + pid).set(Date.now());
+    // Also remove their player node
+    return this.ref('rooms/' + code + '/players/' + pid).remove()
+      .catch(e => console.warn('[transport] kick:', e));
+  }
+
+  watchKicked(code, myId, cb) {
+    const r = this.ref('rooms/' + code + '/kicked/' + myId);
+    const h = r.on('value', snap => { if (snap.exists()) cb(); });
+    transport._off.push(() => r.off('value', h));
   }
 
   async removePlayer(code, pid) {
@@ -424,8 +450,7 @@ class FirebaseTransport {
   // When any player's node is removed (by onDisconnect or hardLeave),
   // Firebase fires child_removed on all connected clients.
   // That handler checks if players is now empty and deletes the room.
-  // This covers: last-player-presses-leave ✓, second-to-last closes browser ✓
-  // Host-alone-closes-browser is handled by room.onDisconnect().remove() in createRoom.
+  // This covers: last-player-presses-leave ✓, any-player closes browser ✓
   _watchRoomEmpty(code) {
     const playersRef = this.ref('rooms/' + code + '/players');
     const h = playersRef.on('child_removed', () => {
@@ -486,12 +511,6 @@ class FirebaseTransport {
   teardown() {
     this._off.forEach(fn => fn());
     this._off = [];
-  }
-
-  // ── Task 2: Kick player ────────────────────────────────
-  kickPlayer(code, pid) {
-    return this.ref('rooms/' + code + '/players/' + pid).remove()
-      .catch(e => console.warn('[transport] kick:', e));
   }
 
   // ── Task 3: Chat ───────────────────────────────────────
@@ -639,17 +658,14 @@ class RoomManager {
       bus.emit('chat:message', { msg });
     });
 
-    // Task 2: Watch for own removal (kick detection)
-    // Use transport._off so teardown() cleans this up before hardLeave()'s removePlayer fires
-    const myRef = transport.ref('rooms/' + roomCode + '/players/' + myId);
-    const kickH = myRef.on('value', snap => {
+    // Kick detection: watch a dedicated /kicked/<myId> node.
+    // Only ever written by an explicit host kick action — never fires on disconnect/reconnect.
+    transport.watchKicked(roomCode, myId, () => {
       const s = store.get();
-      // Only trigger if we're still in this room and the node vanished
-      if (!snap.exists() && s.roomCode === roomCode && s.myId === myId) {
+      if (s.roomCode === roomCode && s.myId === myId) {
         bus.emit('room:kicked');
       }
     });
-    transport._off.push(() => myRef.off('value', kickH));
   }
 }
 
@@ -1029,13 +1045,11 @@ class WerewolfEngine {
     const g  = store.get().game;
     this.stopVoteTimer();
 
-    // Pre-confirm gravedigger on round 1 (no info available yet)
-    // and cupid on rounds > 1 (their action only applies round 1)
+    // Pre-confirm cupid on rounds > 1 (their action only applies round 1)
     const preConfirm = {};
     if (g.cupidId && g.cupidDone) preConfirm[g.cupidId] = true;
-    // Gravedigger gets pre-confirmed on round 1 (nothing to review yet)
-    const gdPid = Object.keys(g.roles||{}).find(id => g.roles[id] === 'gravedigger' && (g.alive||{})[id]);
-    if (gdPid && (g.wwRound + 1) === 1) preConfirm[gdPid] = true;
+    // Gravedigger is now fully passive (like villager) — auto-confirms each night
+    // No pre-confirm needed; they confirm via btn-gravedigger-done button
 
     store.patchGame({
       wwPhase              : 'night',
@@ -1074,14 +1088,8 @@ class WerewolfEngine {
   _tryEndNight() {
     const g = store.get().game;
     if (g.wwPhase !== 'night') return;
-    const alivePids    = Object.keys(g.alive).filter(id => g.alive[id]);
-    // Active roles + gravedigger (round >= 2) must confirm before night ends
-    const needsAction  = alivePids.filter(pid => {
-      const r = g.roles[pid];
-      if (NIGHT_ACTIVE_ROLES.has(r)) return true;
-      if (r === 'gravedigger' && g.wwRound >= 2) return true;
-      return false;
-    });
+    const alivePids   = Object.keys(g.alive).filter(id => g.alive[id]);
+    const needsAction = alivePids.filter(pid => NIGHT_ACTIVE_ROLES.has(g.roles[pid]));
     if (needsAction.length > 0 && needsAction.every(pid => g.nightConfirmed[pid])) {
       this.stopTimer();
       this._resolveNight();
@@ -1104,6 +1112,7 @@ class WerewolfEngine {
     if (g.wwPhase !== 'night') return;
     const r = g.roles[pid];
     if (r !== 'wolf' && r !== 'wolfking') return;
+    // Target must be alive (wolves CAN vote for themselves or fellow wolves)
     if (!g.alive[targetId]) return;
 
     const wolfVotes = Object.assign({}, g.wolfVotes, { [pid]: targetId });
@@ -1856,6 +1865,7 @@ class ChaosEngine {
       modifyTime: cfg.modifyTime || 60,  voteTime: cfg.voteTime || 20,
       timeLeft: cfg.writeTime || 60, chaosRound: 1, chaosPhase: 'write_sentence',
       scores: z(0), greatCounts: z(0), violationCounts: z(0), bonusScores: z(0),
+      gameStartTs: Date.now(),   // unique key per game — forces input reset
     }));
     this.broadcast();
     this._startTimer(cfg.writeTime || 60, () => this._resolveWriteSentence());
@@ -1919,11 +1929,11 @@ class ChaosEngine {
       selectedRule: chosen.rule, selectedRuleAuthor: chosen.pid,
       assignments, modifications: {}, revealOrder: [], voteCardIndex: 0,
       votes: {}, cardConfirmed: {}, bonusVotes: {}, roundScores: {}, bonusScores,
-      reactions: {}, timeLeft: 5,
+      reactions: {}, timeLeft: 3,
     });
     this.broadcast();
-    // Count down 5→0 then start modify
-    let t = 5;
+    // Count down 3→0 then start modify
+    let t = 3;
     const tick = setInterval(() => {
       t = Math.max(0, t - 1);
       store.patchGame({ timeLeft: t });
@@ -2110,7 +2120,10 @@ class ChaosEngine {
   _endRevealNext() {
     const g = store.get().game;
     if (g.chaosPhase !== 'end') return;
-    store.patchGame({ endRevealStep: Math.min((g.endRevealStep || 0) + 1, 2) });
+    const pids = Object.keys(store.get().players).filter(id => !store.get().players[id].isSpectator);
+    // Total steps = pids.length (one per player, last→first) + 2 (badges)
+    const maxStep = pids.length + 2;
+    store.patchGame({ endRevealStep: Math.min((g.endRevealStep || 0) + 1, maxStep) });
     this.broadcast();
   }
 
@@ -2166,16 +2179,7 @@ class UIController {
 
     store.subscribe(s => this._sync(s));
     bus.on(EVT.TOAST,       d  => this.toast(d.msg, d.type));
-    bus.on(EVT.RETURN_LOBBY, () => {
-      this.show('room')
-      ['chaos-sentence-input','chaos-rule-input','chaos-modify-input'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el){
-          el.value = '';
-          el.removeAttribute('data-round');
-        }
-      });
-    });
+    bus.on(EVT.RETURN_LOBBY, () => this.show('room'));
 
     // Task 3: Chat messages from Firebase
     bus.on('chat:message', ({ msg }) => {
@@ -2213,14 +2217,6 @@ class UIController {
           const el = document.getElementById('screen-ww-game');
           if (el) { el.classList.remove('hidden'); el.classList.add('active'); }
           this._screen = 'ww-game';
-
-          ['chaos-sentence-input', 'chaos-rule-input', 'chaos-modify-input'].forEach(id => {
-            const inp = document.getElementById(id);
-            if (inp) {
-              inp.value = '';
-              inp.removeAttribute('data-round');
-            }
-          });
         }
         this._renderWW(Object.assign({}, store.get(), { game: state }));
         return;
@@ -3384,21 +3380,53 @@ class UIController {
     if (msg.ts && msg.ts <= this._chatSeenTs) return;
     if (msg.ts) this._chatSeenTs = Math.max(this._chatSeenTs, msg.ts);
 
-    var s    = store.get();
-    var isMe = msg.pid === s.myId;
-    var el   = document.createElement('div');
-    el.className = 'fc-msg' + (isMe ? ' fc-msg-me' : '');
-    el.innerHTML =
-      '<span class="fc-msg-name' + (isMe ? ' fc-msg-name-me' : '') + '">' + Utils.escapeHtml(msg.name || '???') + '</span>' +
-      '<span class="fc-msg-text">' + Utils.escapeHtml(msg.text || '') + '</span>';
-    cont.appendChild(el);
+    var s      = store.get();
+    var isMe   = msg.pid === s.myId;
+    var name   = msg.name || '???';
+    var color  = Utils.avatarColor(name);
+    var initial= name[0] || '?';
 
-    // Scroll to bottom
+    // Format timestamp
+    var timeStr = '';
+    if (msg.ts) {
+      var d = new Date(msg.ts);
+      timeStr = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+    }
+
+    var el = document.createElement('div');
+    el.className = 'fc-msg' + (isMe ? ' fc-msg-me' : '');
+
+    if (isMe) {
+      el.innerHTML =
+        '<div class="fc-msg-body fc-msg-body-me">' +
+          '<div class="fc-msg-meta-right">' +
+            '<span class="fc-msg-time">' + timeStr + '</span>' +
+            '<span class="fc-msg-name fc-msg-name-me">' + Utils.escapeHtml(name) + '</span>' +
+          '</div>' +
+          '<div class="fc-msg-bubble fc-msg-bubble-me">' + Utils.escapeHtml(msg.text || '') + '</div>' +
+        '</div>';
+    } else {
+      el.innerHTML =
+        '<div class="fc-msg-avatar" style="background:' + color + '">' + Utils.escapeHtml(initial) + '</div>' +
+        '<div class="fc-msg-body">' +
+          '<div class="fc-msg-meta">' +
+            '<span class="fc-msg-name" style="color:' + color + '">' + Utils.escapeHtml(name) + '</span>' +
+            '<span class="fc-msg-time">' + timeStr + '</span>' +
+          '</div>' +
+          '<div class="fc-msg-bubble">' + Utils.escapeHtml(msg.text || '') + '</div>' +
+        '</div>';
+    }
+
+    cont.appendChild(el);
     cont.scrollTop = cont.scrollHeight;
 
-    // Update online badge
+    // Update online badge only when count changes (saves re-render)
     var badge = document.getElementById('fc-online-badge');
-    if (badge) badge.textContent = Object.keys(s.players || {}).length + ' 人在線';
+    if (badge) {
+      var total = Object.keys(s.players || {}).length;
+      var newLabel = total + ' 人在線';
+      if (badge.textContent !== newLabel) badge.textContent = newLabel;
+    }
 
     // Unread dot if minimized or closed
     if (!this._chatOpen || this._chatMinimized) {
@@ -3526,10 +3554,8 @@ class UIController {
   _renderChaosWriteSentence(g, myId, players) {
     this._showChaosPanel('write-sentence');
     var submitted = !!(g.sentences||{})[myId];
-
-    // Always reset ALL inputs at the start of each write_sentence phase.
-    // Use a combined key of round+phase so any new round triggers a clear.
-    var roundKey = String(g.chaosRound) + '_ws';
+    var ts       = g.gameStartTs || 0;
+    var roundKey = ts + '_' + g.chaosRound + '_ws';
     this._chaosInputReset('chaos-sentence-input', roundKey);
     this._chaosInputReset('chaos-rule-input',     roundKey);
     this._chaosInputReset('chaos-modify-input',   roundKey);
@@ -3544,9 +3570,9 @@ class UIController {
 
   _renderChaosWriteRule(g, myId, players) {
     this._showChaosPanel('write-rule');
-    this._chaosInputReset('chaos-sentence-input', g.chaosRound + '_cleanup');
     var submitted = !!(g.rules||{})[myId];
-    var roundKey  = String(g.chaosRound) + '_wr';
+    var ts       = g.gameStartTs || 0;
+    var roundKey = ts + '_' + g.chaosRound + '_wr';
     if (!submitted) this._chaosInputReset('chaos-rule-input', roundKey);
     var myS = document.getElementById('chaos-your-sentence'); if (myS) myS.textContent = (g.sentences||{})[myId] || '';
     var inp = document.getElementById('chaos-rule-input'); if (inp) inp.disabled = submitted;
@@ -3578,7 +3604,8 @@ class UIController {
     var origPid = (g.assignments||{})[myId];
     var oEl = document.getElementById('chaos-modify-original'); if (oEl) oEl.textContent = origPid ? ((g.sentences||{})[origPid]||'') : '（無）';
     var submitted = !!(g.modifications||{})[myId];
-    var roundKey  = String(g.chaosRound) + '_mod';
+    var ts       = g.gameStartTs || 0;
+    var roundKey = ts + '_' + g.chaosRound + '_mod';
     if (!submitted) this._chaosInputReset('chaos-modify-input', roundKey);
     var inp = document.getElementById('chaos-modify-input'); if (inp) inp.disabled = submitted;
     var btn = document.getElementById('btn-chaos-submit-modify');
@@ -3787,36 +3814,47 @@ class UIController {
 
   _renderChaosRoundResult(g, players, isHost) {
     this._showChaosPanel('round-result');
-    var pids = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
-    var rs = g.roundScores||{}, bs = g.bonusScores||{}, ts = g.scores||{};
-    var order = Array.isArray(g.revealOrder) ? g.revealOrder : [];
-    var sorted = pids.slice().sort(function(a,b){return (ts[b]||0)-(ts[a]||0);});
-    var cont = document.getElementById('chaos-round-result-list');
+    var pids   = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
+    var myId   = store.get().myId;
+    var rs     = g.roundScores||{}, bs = g.bonusScores||{}, ts = g.scores||{};
+    var order  = Array.isArray(g.revealOrder) ? g.revealOrder : [];
+    // Sort by this-round score only (total stays hidden from others)
+    var sorted = pids.slice().sort(function(a,b){ return (rs[b]||0)-(rs[a]||0); });
+    var cont   = document.getElementById('chaos-round-result-list');
     if (cont) {
-      // Show leaderboard
-      var lbHtml = sorted.map(function(pid,i) {
-        var p = players[pid]||{}, medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.';
-        var r = rs[pid]||0, b = bs[pid]||0, t = ts[pid]||0;
-        return '<div class="chaos-result-row"><span class="chaos-result-rank">'+medal+'</span>' +
-          '<div class="chaos-result-avatar" style="background:'+Utils.avatarColor(p.name||pid)+'">'+((p.name||'?')[0])+'</div>' +
-          '<div class="chaos-result-name-wrap"><span class="chaos-result-name">'+Utils.escapeHtml(p.name||pid)+'</span>'+(b>0?'<span class="chaos-bonus-badge">💫 ×'+b+'</span>':'')+'</div>' +
-          '<span class="chaos-result-round '+(r>0?'score-pos':r<0?'score-neg':'')+'">'+((r>0?'+':'')+r)+'</span>' +
-          '<span class="chaos-result-total">總分 '+t+'</span></div>';
-      }).join('');
-      // Show this round's pairs (all revealed)
+      // Round leaderboard — show round score only; own total is visible to self
+      var lbHtml = '<div class="chaos-round-lb-title">📊 本回合得分</div>' +
+        sorted.map(function(pid) {
+          var p   = players[pid]||{};
+          var r   = rs[pid]||0, b = bs[pid]||0;
+          var isMePid = pid === myId;
+          var totalHtml = isMePid
+            ? '<span class="chaos-result-total cr-my-total">我的總分 '+(ts[pid]||0)+'</span>'
+            : '<span class="chaos-result-total cr-hidden-total">總分 ???</span>';
+          return '<div class="chaos-result-row">' +
+            '<div class="chaos-result-avatar" style="background:'+Utils.avatarColor(p.name||pid)+'">'+((p.name||'?')[0])+'</div>' +
+            '<div class="chaos-result-name-wrap">' +
+              '<span class="chaos-result-name">'+Utils.escapeHtml(p.name||pid)+'</span>' +
+              (b>0?'<span class="chaos-bonus-badge">💫 ×'+b+'</span>':'') +
+            '</div>' +
+            '<span class="chaos-result-round '+(r>0?'score-pos':r<0?'score-neg':'')+'">'+((r>0?'+':'')+r)+'</span>' +
+            totalHtml +
+          '</div>';
+        }).join('');
+
+      // Pairs section (all revealed)
       var assignments = g.assignments||{}, sentences = g.sentences||{}, modifications = g.modifications||{}, votes = g.votes||{};
       var pairsHtml = '<div class="chaos-pairs-section"><div class="chaos-pairs-title">本回合所有改句</div>' +
         order.map(function(editorPid) {
-          var origPid = assignments[editorPid];
-          var editor = players[editorPid]||{}, origAuth = players[origPid]||{};
-          var orig = sentences[origPid]||'', mod = modifications[editorPid]||'';
-          // Tally votes for this card - all 5 tiers
-          var goat = 0, great = 0, normal = 0, npc = 0, violation = 0;
-          pids.forEach(function(vp) {
-            var r = (votes[vp]||{})[editorPid];
-            if(r==='goat') goat++; else if(r==='great') great++;
-            else if(r==='normal') normal++; else if(r==='npc') npc++;
-            else if(r==='violation') violation++;
+          var origPid  = assignments[editorPid];
+          var editor   = players[editorPid]||{}, origAuth = players[origPid]||{};
+          var orig     = sentences[origPid]||'', mod = modifications[editorPid]||'';
+          var goat=0,great=0,normal=0,npc=0,violation=0;
+          pids.forEach(function(vp){
+            var r=(votes[vp]||{})[editorPid];
+            if(r==='goat')goat++;else if(r==='great')great++;
+            else if(r==='normal')normal++;else if(r==='npc')npc++;
+            else if(r==='violation')violation++;
           });
           return '<div class="chaos-pair-card">' +
             '<div class="chaos-pair-meta"><span class="chaos-pair-editor">改寫者：'+Utils.escapeHtml(editor.name||'???')+'</span></div>' +
@@ -3828,37 +3866,98 @@ class UIController {
             '</div>' +
           '</div>';
         }).join('') + '</div>';
+
       cont.innerHTML = lbHtml + pairsHtml;
     }
     var nb = document.getElementById('btn-chaos-next-round');
-    if (nb) { nb.classList.toggle('hidden',!isHost); nb.textContent = g.chaosRound>=g.totalRounds?'🏆 查看最終結果':'➡ 下一回合'; }
+    if (nb) {
+      nb.classList.toggle('hidden', !isHost);
+      nb.textContent = g.chaosRound >= g.totalRounds ? '🏆 進入最終揭示' : '➡ 下一回合';
+    }
   }
 
   _renderChaosEnd(g, players, isHost) {
     this._showChaosPanel('end');
-    var pids = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
-    var sc = g.scores||{}, gc = g.greatCounts||{}, vc = g.violationCounts||{}, step = g.endRevealStep||0;
-    var sorted = pids.slice().sort(function(a,b){return (sc[b]||0)-(sc[a]||0);});
+    var pids   = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
+    var sc     = g.scores||{}, gc = g.greatCounts||{}, vc = g.violationCounts||{};
+    var step   = g.endRevealStep || 0;
+    // Sort lowest→highest (reveal from worst to best)
+    var sorted = pids.slice().sort(function(a,b){ return (sc[a]||0)-(sc[b]||0); });
+    var n      = sorted.length;
+    // maxStep = n (one reveal per player) + 2 (badges)
+    var maxStep = n + 2;
+
     var cont = document.getElementById('chaos-end-list');
-    if (cont) cont.innerHTML = sorted.map(function(pid,i) {
-      var p = players[pid]||{}, medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.';
-      var t = sc[pid]||0, g2 = gc[pid]||0, v = vc[pid]||0;
-      var sl = step>=2?'⭐ '+g2+' 超棒　❌ '+v+' 違規':step>=1?'⭐ '+g2+' 超棒':'';
-      return '<div class="chaos-result-row chaos-end-row"><span class="chaos-result-rank">'+medal+'</span>' +
-        '<div class="chaos-result-avatar" style="background:'+Utils.avatarColor(p.name||pid)+'">'+((p.name||'?')[0])+'</div>' +
-        '<div class="chaos-end-info"><span class="chaos-result-name">'+Utils.escapeHtml(p.name||pid)+'</span>'+(sl?'<span class="chaos-end-stats">'+sl+'</span>':'')+'</div>' +
-        '<span class="chaos-result-total chaos-end-total">'+t+' 分</span></div>';
-    }).join('');
     var badges = document.getElementById('chaos-end-badges');
-    if (badges && sorted.length) {
+
+    if (cont) {
+      // Step 0: blank — no one shown yet
+      if (step === 0) {
+        cont.innerHTML = '<div class="chaos-end-waiting"><div class="chaos-end-wait-icon">🏆</div><p>最終結果即將揭示…</p></div>';
+      } else {
+        // Steps 1…n: reveal one player per step (index 0=last place, n-1=1st place)
+        var revealed = sorted.slice(0, step); // show bottom 'step' players revealed so far
+        cont.innerHTML = revealed.map(function(pid, i) {
+          var globalRank = i; // 0=last, n-1=first
+          var revealRank = n - globalRank; // reverse: 1=first(best), n=last(worst)
+          // Display rank from perspective of worst→best reveal
+          var p      = players[pid]||{};
+          var score  = sc[pid]||0;
+          var isJustRevealed = i === revealed.length - 1;
+          var isFirst  = globalRank === n - 1;
+          var isSecond = globalRank === n - 2;
+          var isThird  = globalRank === n - 3;
+          var medal    = isFirst  ? '🥇' :
+                         isSecond ? '🥈' :
+                         isThird  ? '🥉' : (revealRank) + '.';
+          var rowClass = 'chaos-result-row chaos-end-row' +
+                         (isJustRevealed ? ' chaos-end-reveal-new' : '') +
+                         (isFirst  ? ' chaos-end-first'  : '') +
+                         (isSecond ? ' chaos-end-second' : '') +
+                         (isThird  ? ' chaos-end-third'  : '');
+          return '<div class="'+rowClass+'">' +
+            '<span class="chaos-result-rank">'+medal+'</span>' +
+            '<div class="chaos-result-avatar" style="background:'+Utils.avatarColor(p.name||pid)+'">'+((p.name||'?')[0])+'</div>' +
+            '<div class="chaos-end-info"><span class="chaos-result-name">'+Utils.escapeHtml(p.name||pid)+'</span></div>' +
+            '<span class="chaos-result-total chaos-end-total">'+score+' 分</span>' +
+          '</div>';
+        }).reverse().join(''); // show best at top
+      }
+    }
+
+    // Badges (step > n)
+    if (badges) {
       var html = '';
-      if (step>=1) { var mg=sorted.reduce(function(a,b){return (gc[a]||0)>=(gc[b]||0)?a:b;},sorted[0]); html+='<div class="chaos-badge chaos-badge-great">⭐ 最受歡迎　<strong>'+Utils.escapeHtml((players[mg]||{}).name||'???')+'</strong></div>'; }
-      if (step>=2) { var mv=sorted.reduce(function(a,b){return (vc[a]||0)>=(vc[b]||0)?a:b;},sorted[0]); html+='<div class="chaos-badge chaos-badge-viol">❌ 最多違規　<strong>'+Utils.escapeHtml((players[mv]||{}).name||'???')+'</strong></div>'; }
+      if (step > n) {
+        // Most 🔥/⭐ (top ratings)
+        var mg = pids.reduce(function(a,b){return (gc[a]||0)>=(gc[b]||0)?a:b;}, pids[0]||'');
+        html += '<div class="chaos-badge chaos-badge-great chaos-badge-reveal">⭐🔥 最受好評　<strong>'+Utils.escapeHtml((players[mg]||{}).name||'???')+'</strong></div>';
+      }
+      if (step > n + 1) {
+        // Most violations
+        var mv = pids.reduce(function(a,b){return (vc[a]||0)>=(vc[b]||0)?a:b;}, pids[0]||'');
+        html += '<div class="chaos-badge chaos-badge-viol chaos-badge-reveal">💀 最多違規　<strong>'+Utils.escapeHtml((players[mv]||{}).name||'???')+'</strong></div>';
+      }
       badges.innerHTML = html;
     }
-    var rb = document.getElementById('btn-chaos-end-reveal'); if (rb) rb.classList.toggle('hidden', !isHost||step>=2);
-    // Hide back-to-lobby until all awards are revealed
-    var bb = document.getElementById('btn-chaos-back-lobby'); if (bb) bb.classList.toggle('hidden', step < 2);
+
+    // Reveal button: visible to host as long as not at max
+    var rb = document.getElementById('btn-chaos-end-reveal');
+    if (rb) {
+      rb.classList.toggle('hidden', !isHost || step >= maxStep);
+      // Dynamic label for dramatic effect
+      if (step === 0) rb.textContent = '✦ 開始揭示名次！';
+      else if (step < n - 3) rb.textContent = '▶ 揭示下一位…';
+      else if (step === n - 3) rb.textContent = '🥉 揭示第三名！';
+      else if (step === n - 2) rb.textContent = '🥈 揭示第二名！';
+      else if (step === n - 1) rb.textContent = '🥇 揭示第一名！！';
+      else if (step === n) rb.textContent = '⭐ 揭示最佳獎項';
+      else rb.textContent = '💀 揭示最差獎項';
+    }
+
+    // Back button only after all revealed
+    var bb = document.getElementById('btn-chaos-back-lobby');
+    if (bb) bb.classList.toggle('hidden', step < maxStep);
   }
 
   _renderChaosSpectator(g, players) {
@@ -4203,27 +4302,26 @@ class UIController {
     const isActive = NIGHT_ACTIVE_ROLES.has(myRole);
     const amDone   = !!(g.nightConfirmed || {})[myId];
     const amCupid  = myRole === 'cupid';
-    // gravedigger counts as needing action from round 2 onwards
-    const gdNeedsAction = amGD && g.wwRound >= 2;
-    const isPassive = !isActive && !amHunter && !amCupid && !amGD; // villager, bomber, knight
+    // gravedigger is passive — doesn't block night end, always sees their panel
+    const isPassive = !isActive && !amHunter && !amCupid && !amGD;
 
-    // Each player sees only their own panel simultaneously
     this._show('ww-night-wolf',        amWolf   && !amDone);
     this._show('ww-night-seer',        amSeer   && !amDone);
     this._show('ww-night-witch',       amWitch  && !amDone);
     this._show('ww-night-hunter',      amHunter && !amDone);
     this._show('ww-night-cupid',       amCupid  && !amDone && !g.cupidDone);
-    this._show('ww-night-gravedigger', amGD && !amDone);
+    // Gravedigger sees their panel every night (round 1 = no info, still has the mini-game)
+    this._show('ww-night-gravedigger', amGD);
     this._show('ww-night-passive',     isPassive && !amDone);
-    // Show waiting scene when done
+    // Waiting scene: active role done OR passive/hunter/cupid confirmed
+    // Gravedigger never goes to waiting (they can enjoy the mini-game all night)
     this._show('ww-night-waiting',
       (isActive && amDone) ||
-      ((isPassive || amHunter || amCupid) && amDone) ||
-      (amGD && amDone)
+      ((isPassive || amHunter || amCupid) && amDone)
     );
 
     // ── Gravedigger panel ─────────────────────────────────
-    if (amGD && !amDone) {
+    if (amGD) {
       var gdHint = document.getElementById('gravedigger-night-hint');
       var gdLog  = document.getElementById('gravedigger-log-display');
       var logArr = Array.isArray(g.gravediggerLog) ? g.gravediggerLog
@@ -4611,7 +4709,7 @@ class UIController {
 
     // ── Wolf panel ────────────────────────────────────────
     if (amWolf && !amDone) {
-      const targets = Object.keys(g.alive||{}).filter(id => g.alive[id] && !(g.roles[id]==='wolf'||g.roles[id]==='wolfking'));
+      const targets = Object.keys(g.alive||{}).filter(id => g.alive[id]);
       var wolfGrid = document.getElementById('ww-wolf-vote-grid');
       if (wolfGrid) {
         wolfGrid.innerHTML = targets.map(function(pid) {
@@ -4700,9 +4798,15 @@ class UIController {
       var killedEl = document.getElementById('ww-witch-killed');
       if (killedEl) {
         if (g.wolfTarget) {
-          // Witch only knows SOMEONE was targeted — not who
-          killedEl.innerHTML = '<div class="witch-kill-label">今晚有人被狼人選中。</div>' +
-            '<div class="witch-kill-name" style="font-size:.85rem;color:var(--txt1)">是否要使用解藥救人？（你不知道是誰）</div>';
+          var targetName = (players[g.wolfTarget] || {}).name || '???';
+          var targetColor = Utils.avatarColor(targetName);
+          killedEl.innerHTML =
+            '<div class="witch-kill-label">今晚被狼人選中的是：</div>' +
+            '<div class="witch-kill-name-row">' +
+              '<div class="witch-target-avatar" style="background:' + targetColor + '">' + targetName[0] + '</div>' +
+              '<span class="witch-kill-name">' + Utils.escapeHtml(targetName) + '</span>' +
+            '</div>' +
+            '<div class="witch-kill-hint">使用解藥可以救他</div>';
         } else {
           killedEl.innerHTML = '<div class="witch-kill-label witch-kill-wait">⏳ 等待狼人確認目標中…</div>';
         }
