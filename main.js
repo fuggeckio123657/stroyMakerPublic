@@ -528,6 +528,28 @@ class FirebaseTransport {
     });
     this._off.push(() => r.off('child_added', h));
   }
+
+  // ── DM private chat ────────────────────────────────────
+  // Path: rooms/<code>/dm/<sortedKey> where sortedKey = [pid1,pid2].sort().join('_')
+  _dmKey(pid1, pid2) { return [pid1, pid2].sort().join('_'); }
+
+  pushDM(code, fromId, toId, msg) {
+    const key = this._dmKey(fromId, toId);
+    this.ref('rooms/' + code + '/dm/' + key).push(
+      Object.assign({}, msg, { ts: Date.now() })
+    ).catch(() => {});
+  }
+
+  watchDM(code, myId, targetId, cb) {
+    const key = this._dmKey(myId, targetId);
+    const r   = this.ref('rooms/' + code + '/dm/' + key);
+    const h   = r.limitToLast(80).on('child_added', snap => {
+      if (snap.exists()) cb(snap.val());
+    });
+    this._off.push(() => r.off('child_added', h));
+    // Return an unsubscribe fn for when the user switches DM target
+    return () => r.off('child_added', h);
+  }
 }
 
 const transport = new FirebaseTransport();
@@ -2181,10 +2203,10 @@ class UIController {
     bus.on(EVT.TOAST,       d  => this.toast(d.msg, d.type));
     bus.on(EVT.RETURN_LOBBY, () => this.show('room'));
 
-    // Task 3: Chat messages from Firebase
-    bus.on('chat:message', ({ msg }) => {
-      this._appendChatMsg(msg);
-    });
+    // Unified chat: public messages
+    bus.on('chat:message', ({ msg }) => { this._appendChatMsg(msg); });
+    // Unified chat: DM messages
+    bus.on('dm:message',   ({ msg }) => { this._appendDMMsg(msg); });
 
     // Task 2: Kicked event — show prominent modal
     bus.on('room:kicked', () => {
@@ -2261,7 +2283,7 @@ class UIController {
     this._bindGame();
     this._bindWWGame();
     this._bindChaosGame();
-    this._bindChat();
+    this._bindUnifiedChat();
 
     // Kicked modal OK button
     var self = this;
@@ -2831,7 +2853,7 @@ class UIController {
       var msgs = document.getElementById('fc-messages');
       if (msgs) msgs.innerHTML = '';
       self._chatSeenTs = 0;
-      self._showFloatingChat(false);
+      self._showUnifiedChat(false);
       self.show('home');
     });
 
@@ -3229,173 +3251,347 @@ class UIController {
     }
   }
 
-  // ── Task 3: Floating Chat binding ────────────────────
+  // ── Unified Chat (public + DM) ────────────────────────
 
-  _bindChat() {
+  _bindUnifiedChat() {
     var self = this;
     this._chatSeenTs   = 0;
-    this._chatUnread   = 0;
     this._chatOpen     = false;
     this._chatMinimized = false;
+    this._chatUnread    = 0;          // public unread
+    this._dmTarget      = null;       // current DM partner pid
+    this._dmWatcher     = null;       // { unsubFn, targetId } — active DM Firebase listener
+    this._dmLoaded      = {};         // { pid: true } — which convos have been loaded already
+    this._dmUnread      = 0;
+    this._activeTab     = 'public';   // 'public' | 'dm'
 
-    // ── Show/hide chat on room screen ──────────────────
+    // ── Room lifecycle ──────────────────────────────────
     bus.on(EVT.ROOM_JOINED, function() {
-      // Clear old messages before showing chat for new room
       var msgs = document.getElementById('fc-messages');
       if (msgs) msgs.innerHTML = '';
-      self._chatSeenTs = 0;
-      self._chatUnread = 0;
-      var dot = document.getElementById('fc-unread-dot');
+      self._chatSeenTs = 0; self._chatUnread = 0; self._dmUnread = 0;
+      self._dmTarget   = null; self._dmLoaded  = {};
+      if (self._dmWatcher) { self._dmWatcher.unsubFn(); self._dmWatcher = null; }
+      var dot = document.getElementById('chat-unread-dot');
       if (dot) dot.classList.add('hidden');
-      self._showFloatingChat(true);
+      var dmDot = document.getElementById('dm-tab-dot');
+      if (dmDot) dmDot.classList.add('hidden');
+      self._showUnifiedChat(true);
     });
-    bus.on(EVT.RETURN_LOBBY, function() { self._showFloatingChat(true); });
-    bus.on('room:kicked', function() { self._showFloatingChat(false); });
+    bus.on(EVT.RETURN_LOBBY,  function() { self._showUnifiedChat(true);  });
+    bus.on('room:kicked',     function() { self._showUnifiedChat(false); });
 
-    // Hide chat when leaving room
-    var origHardLeave = null; // handled by show('home') route
-
-    // ── Open / close ───────────────────────────────────
-    var openBtn  = document.getElementById('fc-open-btn');
-    var chat     = document.getElementById('floating-chat');
-    var closeBtn = document.getElementById('fc-close-btn');
-    var toggleBtn= document.getElementById('fc-toggle-btn');
-    var body     = document.getElementById('fc-body');
+    // ── Panel open/close/toggle ─────────────────────────
+    var panel   = document.getElementById('chat-panel');
+    var openBtn = document.getElementById('chat-open-btn');
+    var closeBtn= document.getElementById('chat-panel-close');
+    var toggleBtn=document.getElementById('chat-panel-toggle');
 
     if (openBtn) openBtn.addEventListener('click', function() {
-      self._chatOpen = true;
-      self._chatMinimized = false;
-      self._chatUnread = 0;
-      if (chat) { chat.classList.remove('hidden'); chat.classList.remove('fc-minimized'); }
+      if (!panel) return;
+      panel.classList.remove('hidden');
+      panel.classList.remove('cp-minimized');
       openBtn.classList.add('hidden');
-      var dot = document.getElementById('fc-unread-dot');
+      self._chatOpen     = true;
+      self._chatMinimized = false;
+      self._chatUnread   = 0; self._dmUnread = 0;
+      var dot = document.getElementById('chat-unread-dot');
       if (dot) dot.classList.add('hidden');
+      var dmDot = document.getElementById('dm-tab-dot');
+      if (dmDot) dmDot.classList.add('hidden');
+      // Scroll public to bottom
       var msgs = document.getElementById('fc-messages');
       if (msgs) msgs.scrollTop = msgs.scrollHeight;
+      // Refresh DM picker if on DM tab
+      if (self._activeTab === 'dm' && !self._dmTarget) self._renderDMPicker();
     });
 
     if (closeBtn) closeBtn.addEventListener('click', function() {
-      self._chatOpen = false;
-      if (chat) chat.classList.add('hidden');
+      if (panel) panel.classList.add('hidden');
       if (openBtn) openBtn.classList.remove('hidden');
+      self._chatOpen = false;
     });
 
     if (toggleBtn) toggleBtn.addEventListener('click', function() {
       self._chatMinimized = !self._chatMinimized;
-      if (chat) chat.classList.toggle('fc-minimized', self._chatMinimized);
+      if (panel) panel.classList.toggle('cp-minimized', self._chatMinimized);
       toggleBtn.textContent = self._chatMinimized ? '▲' : '▼';
     });
 
-    // ── Drag to reposition ─────────────────────────────
-    var header = document.getElementById('fc-header');
-    if (chat && header) {
-      var dragging = false, ox = 0, oy = 0;
+    // ── Tab switching ───────────────────────────────────
+    document.querySelectorAll('.chat-tab').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var tab = btn.getAttribute('data-tab');
+        self._switchChatTab(tab);
+      });
+    });
+
+    // ── Drag ───────────────────────────────────────────
+    var header = document.getElementById('chat-panel-header');
+    if (panel && header) {
+      var drag = false, ox = 0, oy = 0;
       header.addEventListener('mousedown', function(e) {
-        if (e.target.closest('button')) return;
-        dragging = true;
-        var rect = chat.getBoundingClientRect();
-        ox = e.clientX - rect.left;
-        oy = e.clientY - rect.top;
-        chat.style.transition = 'none';
-        e.preventDefault();
+        if (e.target.closest('button') || e.target.closest('.chat-tab-bar')) return;
+        drag = true;
+        var r = panel.getBoundingClientRect(); ox = e.clientX - r.left; oy = e.clientY - r.top;
+        panel.style.transition = 'none'; e.preventDefault();
       });
       document.addEventListener('mousemove', function(e) {
-        if (!dragging) return;
-        var x = Math.max(0, Math.min(window.innerWidth  - chat.offsetWidth,  e.clientX - ox));
-        var y = Math.max(0, Math.min(window.innerHeight - chat.offsetHeight, e.clientY - oy));
-        chat.style.right  = 'auto';
-        chat.style.bottom = 'auto';
-        chat.style.left   = x + 'px';
-        chat.style.top    = y + 'px';
+        if (!drag) return;
+        var x = Math.max(0, Math.min(window.innerWidth  - panel.offsetWidth,  e.clientX - ox));
+        var y = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, e.clientY - oy));
+        panel.style.right = 'auto'; panel.style.bottom = 'auto';
+        panel.style.left  = x + 'px'; panel.style.top = y + 'px';
       });
-      document.addEventListener('mouseup', function() {
-        if (dragging) { dragging = false; chat.style.transition = ''; }
-      });
-      // Touch drag
-      header.addEventListener('touchstart', function(e) {
-        if (e.target.closest('button')) return;
-        var t = e.touches[0];
-        dragging = true;
-        var rect = chat.getBoundingClientRect();
-        ox = t.clientX - rect.left;
-        oy = t.clientY - rect.top;
-        chat.style.transition = 'none';
-      }, { passive: true });
-      document.addEventListener('touchmove', function(e) {
-        if (!dragging) return;
-        var t = e.touches[0];
-        var x = Math.max(0, Math.min(window.innerWidth  - chat.offsetWidth,  t.clientX - ox));
-        var y = Math.max(0, Math.min(window.innerHeight - chat.offsetHeight, t.clientY - oy));
-        chat.style.right  = 'auto';
-        chat.style.bottom = 'auto';
-        chat.style.left   = x + 'px';
-        chat.style.top    = y + 'px';
-      }, { passive: true });
-      document.addEventListener('touchend', function() {
-        if (dragging) { dragging = false; chat.style.transition = ''; }
-      });
+      document.addEventListener('mouseup', function() { if (drag) { drag = false; panel.style.transition = ''; } });
     }
 
-    // ── Send message ───────────────────────────────────
-    var sendMsg = function() {
+    // ── Public chat send ────────────────────────────────
+    var sendPublic = function() {
       var inp = document.getElementById('fc-input');
       if (!inp) return;
-      var text = inp.value.trim();
-      if (!text) return;
-      var s = store.get();
-      if (!s.roomCode || !s.myId) return;
+      var text = inp.value.trim(); if (!text) return;
+      var s = store.get(); if (!s.roomCode || !s.myId) return;
       inp.value = '';
-      transport.pushChat(s.roomCode, {
-        pid : s.myId, name: s.myName || '???', text: text,
-      });
+      transport.pushChat(s.roomCode, { pid: s.myId, name: s.myName || '???', text: text });
     };
-
     var fcSend = document.getElementById('fc-send-btn');
-    if (fcSend) fcSend.addEventListener('click', sendMsg);
-    var fcInp = document.getElementById('fc-input');
-    if (fcInp) fcInp.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+    if (fcSend) fcSend.addEventListener('click', sendPublic);
+    var fcInp  = document.getElementById('fc-input');
+    if (fcInp)  fcInp.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPublic(); }
+    });
+
+    // ── DM back button ──────────────────────────────────
+    var dmBack = document.getElementById('dm-back-btn');
+    if (dmBack) dmBack.addEventListener('click', function() {
+      self._closeDMConvo();
+      self._renderDMPicker();
+    });
+
+    // ── DM send ─────────────────────────────────────────
+    var sendDM = function() {
+      var inp = document.getElementById('dm-input');
+      if (!inp || !self._dmTarget) return;
+      var text = inp.value.trim(); if (!text) return;
+      var s = store.get(); if (!s.roomCode || !s.myId) return;
+      inp.value = '';
+      transport.pushDM(s.roomCode, s.myId, self._dmTarget, { pid: s.myId, name: s.myName || '???', text: text });
+    };
+    var dmSend = document.getElementById('dm-send-btn');
+    if (dmSend) dmSend.addEventListener('click', sendDM);
+    var dmInp  = document.getElementById('dm-input');
+    if (dmInp)  dmInp.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendDM(); }
     });
   }
 
-  _showFloatingChat(visible) {
-    var chat    = document.getElementById('floating-chat');
-    var openBtn = document.getElementById('fc-open-btn');
+  _switchChatTab(tab) {
+    this._activeTab = tab;
+    document.querySelectorAll('.chat-tab').forEach(function(b) {
+      b.classList.toggle('chat-tab-active', b.getAttribute('data-tab') === tab);
+    });
+    var pubContent = document.getElementById('chat-tab-public');
+    var dmContent  = document.getElementById('chat-tab-dm');
+    if (pubContent) pubContent.classList.toggle('hidden', tab !== 'public');
+    if (dmContent)  dmContent.classList.toggle('hidden',  tab !== 'dm');
+    if (tab === 'public') {
+      var msgs = document.getElementById('fc-messages');
+      if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    }
+    if (tab === 'dm') {
+      // Clear DM tab unread dot
+      var dmDot = document.getElementById('dm-tab-dot');
+      if (dmDot) dmDot.classList.add('hidden');
+      this._dmUnread = 0;
+
+      // If there's an active watcher but _dmTarget is null (user pressed ← back),
+      // show picker. If watcher exists and _dmTarget is set, restore convo view.
+      if (this._dmWatcher && this._dmTarget !== null) {
+        // Convo already open — just scroll to bottom
+        var dmsgs = document.getElementById('dm-messages');
+        if (dmsgs) dmsgs.scrollTop = dmsgs.scrollHeight;
+      } else {
+        // Show picker
+        this._renderDMPicker();
+      }
+    }
+  }
+
+  _showUnifiedChat(visible) {
+    var panel   = document.getElementById('chat-panel');
+    var openBtn = document.getElementById('chat-open-btn');
     if (!visible) {
-      if (chat)    chat.classList.add('hidden');
+      if (panel)   panel.classList.add('hidden');
       if (openBtn) openBtn.classList.add('hidden');
       this._chatOpen = false;
+      // Stop DM watcher when leaving room
+      if (this._dmWatcher) { this._dmWatcher.unsubFn(); this._dmWatcher = null; }
+      this._dmTarget = null;
     } else {
-      // Enter room: default CLOSED — show open button, hide the window
+      // Enter room: default closed
       this._chatOpen = false;
-      this._chatMinimized = false;
-      if (chat)    chat.classList.add('hidden');
+      if (panel)   panel.classList.add('hidden');
       if (openBtn) openBtn.classList.remove('hidden');
     }
+  }
+
+  _renderDMPicker() {
+    var list = document.getElementById('dm-player-list');
+    if (!list) return;
+    var s      = store.get();
+    var myId   = s.myId;
+    var others = Object.entries(s.players || {}).filter(function(e) { return e[0] !== myId; });
+    var self   = this;
+    var unreadMap = this._dmUnreadMap || {};
+    if (!others.length) { list.innerHTML = '<div class="dm-no-players">目前沒有其他玩家</div>'; return; }
+    list.innerHTML = others.map(function(e) {
+      var pid   = e[0], p = e[1];
+      var color = Utils.avatarColor(p.name || pid);
+      var cnt   = unreadMap[pid] || 0;
+      var badge = cnt > 0 ? '<span class="dm-unread-badge">' + cnt + '</span>' : '';
+      return '<div class="dm-player-row" data-pid="' + pid + '">' +
+        '<div class="dm-p-avatar" style="background:' + color + '">' + (p.name||'?')[0] + '</div>' +
+        '<span class="dm-p-name">' + Utils.escapeHtml(p.name || pid) + '</span>' +
+        badge +
+        '<span class="dm-p-arrow">›</span>' +
+      '</div>';
+    }).join('');
+    list.querySelectorAll('.dm-player-row').forEach(function(row) {
+      row.addEventListener('click', function() {
+        var pid = row.getAttribute('data-pid');
+        var p   = (s.players || {})[pid] || {};
+        self._openDMWith(pid, p.name || pid);
+      });
+    });
+  }
+
+  _openDMWith(targetId, targetName) {
+    var self     = this;
+    var picker   = document.getElementById('dm-picker-view');
+    var convo    = document.getElementById('dm-convo-view');
+    var withName = document.getElementById('dm-with-name');
+    var msgs     = document.getElementById('dm-messages');
+
+    this._dmTarget = targetId;
+
+    // Clear per-pid unread badge for this target
+    if (!this._dmUnreadMap) this._dmUnreadMap = {};
+    this._dmUnreadMap[targetId] = 0;
+    this._updateDMDots();
+
+    if (picker)   picker.classList.add('hidden');
+    if (convo)    convo.classList.remove('hidden');
+    if (withName) withName.textContent = '🤫 ' + targetName;
+
+    // If already watching this same target, just scroll — don't re-fetch (messages already rendered)
+    if (this._dmWatcher && this._dmWatcher.targetId === targetId) {
+      if (msgs) msgs.scrollTop = msgs.scrollHeight;
+      return;
+    }
+
+    // Stop old watcher (different target)
+    if (this._dmWatcher) { this._dmWatcher.unsubFn(); this._dmWatcher = null; }
+
+    // Clear and reload messages for new target
+    if (msgs) msgs.innerHTML = '';
+
+    var s = store.get();
+    if (!s.roomCode || !s.myId) return;
+
+    var unsubFn = transport.watchDM(s.roomCode, s.myId, targetId, function(msg) {
+      bus.emit('dm:message', { msg: msg });
+    });
+    this._dmWatcher = { unsubFn: unsubFn, targetId: targetId };
+  }
+
+  _closeDMConvo() {
+    // Do NOT clear _dmTarget — keep tracking which conversation is active for notifications
+    // Just flip the UI back to picker view
+    var picker = document.getElementById('dm-picker-view');
+    var convo  = document.getElementById('dm-convo-view');
+    if (picker) picker.classList.remove('hidden');
+    if (convo)  convo.classList.add('hidden');
+    this._dmTarget = null;   // null means "picker visible", watcher still runs
+    this._renderDMPicker();
+  }
+
+  _updateDMDots() {
+    var map    = this._dmUnreadMap || {};
+    var anyDM  = Object.keys(map).some(function(k) { return map[k] > 0; });
+    var dmDot  = document.getElementById('dm-tab-dot');
+    if (dmDot) dmDot.classList.toggle('hidden', !anyDM);
+    // Also update button dot (combines public + DM unread)
+    var anyUnread = anyDM || this._chatUnread > 0;
+    var btnDot = document.getElementById('chat-unread-dot');
+    if (btnDot) btnDot.classList.toggle('hidden', !anyUnread || this._chatOpen);
+    var openBtn = document.getElementById('chat-open-btn');
+    if (openBtn && anyUnread && !this._chatOpen) openBtn.classList.remove('hidden');
   }
 
   _appendChatMsg(msg) {
     var cont = document.getElementById('fc-messages');
     if (!cont) return;
+    // Dedup
     if (msg.ts && msg.ts <= this._chatSeenTs) return;
     if (msg.ts) this._chatSeenTs = Math.max(this._chatSeenTs, msg.ts);
 
-    var s      = store.get();
-    var isMe   = msg.pid === s.myId;
-    var name   = msg.name || '???';
-    var color  = Utils.avatarColor(name);
-    var initial= name[0] || '?';
+    var s    = store.get();
+    var isMe = msg.pid === s.myId;
+    cont.appendChild(this._makeMsgEl(msg, isMe, false));
+    cont.scrollTop = cont.scrollHeight;
 
-    // Format timestamp
+    // Online badge
+    var badge = document.getElementById('fc-online-badge');
+    if (badge) { var lbl = Object.keys(s.players||{}).length+' 人在線'; if (badge.textContent!==lbl) badge.textContent=lbl; }
+
+    // Unread if panel closed or on DM tab
+    if (!this._chatOpen || this._activeTab !== 'public') {
+      if (!isMe) {
+        this._chatUnread++;
+        if (!this._chatOpen) {
+          var dot = document.getElementById('chat-unread-dot');
+          if (dot) dot.classList.remove('hidden');
+        }
+      }
+    }
+  }
+
+  _appendDMMsg(msg) {
+    var s    = store.get();
+    var isMe = msg.pid === s.myId;
+    // The active watcher tells us which conversation this message belongs to
+    var watchedId   = this._dmWatcher ? this._dmWatcher.targetId : null;
+    var msgFromPid  = isMe ? watchedId : msg.pid;  // infer sender's conversation partner
+    // Only render if convo view is open AND on DM tab AND panel is open
+    var convoVisible = this._chatOpen && this._activeTab === 'dm' && this._dmTarget !== null;
+    var msgBelongs   = this._dmTarget === msg.pid || (isMe && this._dmTarget !== null);
+    var cont = document.getElementById('dm-messages');
+
+    if (convoVisible && msgBelongs && cont) {
+      cont.appendChild(this._makeMsgEl(msg, isMe, true));
+      cont.scrollTop = cont.scrollHeight;
+    } else if (!isMe) {
+      // Not viewing this convo — accumulate per-pid unread count
+      if (!this._dmUnreadMap) this._dmUnreadMap = {};
+      var fromPid = watchedId || msg.pid;
+      this._dmUnreadMap[fromPid] = (this._dmUnreadMap[fromPid] || 0) + 1;
+      this._dmUnread++;
+      this._updateDMDots();
+    }
+  }
+
+  _makeMsgEl(msg, isMe, isDM) {
+    var name    = msg.name || '???';
+    var color   = Utils.avatarColor(name);
     var timeStr = '';
     if (msg.ts) {
       var d = new Date(msg.ts);
-      timeStr = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+      timeStr = d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');
     }
-
     var el = document.createElement('div');
     el.className = 'fc-msg' + (isMe ? ' fc-msg-me' : '');
-
+    var bubbleCls = 'fc-msg-bubble' + (isMe ? ' fc-msg-bubble-me' : '') + (isDM ? ' dm-bubble' : '');
     if (isMe) {
       el.innerHTML =
         '<div class="fc-msg-body fc-msg-body-me">' +
@@ -3403,44 +3599,24 @@ class UIController {
             '<span class="fc-msg-time">' + timeStr + '</span>' +
             '<span class="fc-msg-name fc-msg-name-me">' + Utils.escapeHtml(name) + '</span>' +
           '</div>' +
-          '<div class="fc-msg-bubble fc-msg-bubble-me">' + Utils.escapeHtml(msg.text || '') + '</div>' +
+          '<div class="' + bubbleCls + '">' + Utils.escapeHtml(msg.text || '') + '</div>' +
         '</div>';
     } else {
       el.innerHTML =
-        '<div class="fc-msg-avatar" style="background:' + color + '">' + Utils.escapeHtml(initial) + '</div>' +
+        '<div class="fc-msg-avatar" style="background:' + color + '">' + Utils.escapeHtml(name[0]) + '</div>' +
         '<div class="fc-msg-body">' +
           '<div class="fc-msg-meta">' +
             '<span class="fc-msg-name" style="color:' + color + '">' + Utils.escapeHtml(name) + '</span>' +
             '<span class="fc-msg-time">' + timeStr + '</span>' +
           '</div>' +
-          '<div class="fc-msg-bubble">' + Utils.escapeHtml(msg.text || '') + '</div>' +
+          '<div class="' + bubbleCls + '">' + Utils.escapeHtml(msg.text || '') + '</div>' +
         '</div>';
     }
-
-    cont.appendChild(el);
-    cont.scrollTop = cont.scrollHeight;
-
-    // Update online badge only when count changes (saves re-render)
-    var badge = document.getElementById('fc-online-badge');
-    if (badge) {
-      var total = Object.keys(s.players || {}).length;
-      var newLabel = total + ' 人在線';
-      if (badge.textContent !== newLabel) badge.textContent = newLabel;
-    }
-
-    // Unread dot if minimized or closed
-    if (!this._chatOpen || this._chatMinimized) {
-      if (!isMe) {
-        this._chatUnread = (this._chatUnread || 0) + 1;
-        var dot = document.getElementById('fc-unread-dot');
-        if (dot) dot.classList.remove('hidden');
-        var openBtn = document.getElementById('fc-open-btn');
-        if (openBtn && !this._chatOpen) openBtn.classList.remove('hidden');
-      }
-    }
+    return el;
   }
 
-  // ── Chaos Game Bindings ───────────────────────────────
+
+  // ── Chaos Game Bindings ─────────────────────────────
 
   _bindChaosGame() {
     var self = this;
@@ -3601,16 +3777,25 @@ class UIController {
   _renderChaosModify(g, myId, players) {
     this._showChaosPanel('modify');
     var rEl = document.getElementById('chaos-modify-rule'); if (rEl) rEl.textContent = g.selectedRule || '';
-    var origPid = (g.assignments||{})[myId];
-    var oEl = document.getElementById('chaos-modify-original'); if (oEl) oEl.textContent = origPid ? ((g.sentences||{})[origPid]||'') : '（無）';
+    var origPid  = (g.assignments||{})[myId];
+    var origText = origPid ? ((g.sentences||{})[origPid]||'') : '';
+    var oEl = document.getElementById('chaos-modify-original'); if (oEl) oEl.textContent = origText || '（無）';
     var submitted = !!(g.modifications||{})[myId];
     var ts       = g.gameStartTs || 0;
     var roundKey = ts + '_' + g.chaosRound + '_mod';
-    if (!submitted) this._chaosInputReset('chaos-modify-input', roundKey);
-    var inp = document.getElementById('chaos-modify-input'); if (inp) inp.disabled = submitted;
+    var inp = document.getElementById('chaos-modify-input');
+    if (!submitted) {
+      // Reset input on new round/game
+      if (inp && inp.getAttribute('data-round') !== String(roundKey)) {
+        inp.value = origText;  // ← pre-fill with original sentence
+        inp.setAttribute('data-round', roundKey);
+      }
+    }
+    if (inp) inp.disabled = submitted;
     var btn = document.getElementById('btn-chaos-submit-modify');
     if (btn) { btn.disabled = submitted; btn.textContent = submitted ? '✓ 已提交，等待其他人…' : '✦ 提交修改結果'; }
-    var unBtn = document.getElementById('btn-chaos-unsubmit-modify'); if (unBtn) unBtn.classList.toggle('hidden', !submitted);
+    var unBtn = document.getElementById('btn-chaos-unsubmit-modify');
+    if (unBtn) unBtn.classList.toggle('hidden', !submitted);
     var pids = Object.keys(players).filter(function(id){return !players[id].isSpectator;});
     var prog = document.getElementById('chaos-modify-progress');
     if (prog) prog.textContent = pids.filter(function(p){return !!(g.modifications||{})[p];}).length + ' / ' + pids.length + ' 人已完成';
@@ -4310,6 +4495,7 @@ class UIController {
     this._show('ww-night-witch',       amWitch  && !amDone);
     this._show('ww-night-hunter',      amHunter && !amDone);
     this._show('ww-night-cupid',       amCupid  && !amDone && !g.cupidDone);
+    this._show('ww-night-cupid-toy',   amCupid  && g.cupidDone);  // arrow gallery after firing
     // Gravedigger sees their panel every night (round 1 = no info, still has the mini-game)
     this._show('ww-night-gravedigger', amGD);
     this._show('ww-night-passive',     isPassive && !amDone);
@@ -4417,6 +4603,66 @@ class UIController {
           }
           setTimeout(spawnGhost, 600);
           setTimeout(spawnGhost, 1600);
+        })();
+      }
+    }
+
+    // ── Cupid toy (round 2+, after firing arrow) ──────────
+    if (amCupid && g.cupidDone) {
+      var cupidToy = document.getElementById('night-toy-cupid');
+      if (cupidToy && cupidToy.getAttribute('data-init') !== '1') {
+        cupidToy.setAttribute('data-init', '1');
+        cupidToy.innerHTML =
+          '<div class="toy-cupid-game">' +
+            '<div class="cupid-sky" id="cupid-sky"></div>' +
+            '<div class="cupid-hud">' +
+              '<span id="cupid-hit-count">💘 命中：0</span>' +
+              '<span id="cupid-miss-count">💔 失誤：0</span>' +
+            '</div>' +
+            '<div class="toy-msg" id="toy-msg-cupid">點擊愛心射箭！</div>' +
+          '</div>';
+        (function() {
+          var sky    = cupidToy.querySelector('#cupid-sky');
+          var hEl    = cupidToy.querySelector('#cupid-hit-count');
+          var mEl    = cupidToy.querySelector('#cupid-miss-count');
+          var msgEl  = cupidToy.querySelector('#toy-msg-cupid');
+          var hits = 0, miss = 0;
+          var hitMsgs  = ['💘 命中！','💕 愛的箭！','💝 射穿心！','❤️‍🔥 燃起來！','💞 配對！'];
+          var missMsgs = ['💨 偏了…','😅 再瞄準','🏹 下次一定'];
+          var hearts   = ['💗','💓','💞','💖','❤️','🩷','💝'];
+
+          function spawnHeart() {
+            if (!sky) return;
+            var el     = document.createElement('div');
+            el.className = 'cupid-heart-target';
+            el.textContent = hearts[Math.floor(Math.random() * hearts.length)];
+            var leftPct = 6 + Math.random() * 80;
+            var dur     = 2200 + Math.random() * 1000;
+            el.style.cssText = 'left:' + leftPct + '%;animation-duration:' + dur + 'ms';
+
+            var alive = true;
+            el.addEventListener('click', function(e) {
+              if (!alive) return;
+              e.stopPropagation(); alive = false; hits++;
+              el.style.animation = 'heartPop .3s ease forwards';
+              if (hEl)   hEl.textContent  = '💘 命中：' + hits;
+              if (msgEl) msgEl.textContent = hitMsgs[hits % hitMsgs.length];
+              setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 320);
+            });
+
+            sky.appendChild(el);
+            setTimeout(function() {
+              if (!alive) return;
+              alive = false; miss++;
+              if (mEl)   mEl.textContent  = '💔 失誤：' + miss;
+              if (msgEl) msgEl.textContent = missMsgs[miss % missMsgs.length];
+              if (el.parentNode) el.parentNode.removeChild(el);
+            }, dur + 100);
+
+            setTimeout(spawnHeart, 700 + Math.random() * 800);
+          }
+          setTimeout(spawnHeart, 500);
+          setTimeout(spawnHeart, 1400);
         })();
       }
     }
@@ -4529,37 +4775,100 @@ class UIController {
         toyWrap.setAttribute('data-toy-role', myRole);
 
         if (myRole === 'bomber') {
-          // 💣 Bomber: defuse the bomb game
-          toyWrap.style.width  = '220px';
-          toyWrap.style.height = '150px';
+          // 💣 Bomber: FUSE CHARGE — click rapidly to charge the fuse; boom on full charge
+          toyWrap.style.width  = '280px';
+          toyWrap.style.height = '185px';
           toyWrap.innerHTML =
-            '<div class="toy-scene" id="toy-scene">' +
-              '<div class="toy-bomb" id="toy-bomb">💣</div>' +
-              '<div class="toy-fuse" id="toy-fuse">〰</div>' +
-            '</div>' +
-            '<div class="toy-msg" id="toy-msg">點炸彈試試</div>';
+            '<div class="toy-bomber-game" id="toy-bomber-game">' +
+              '<div class="bom-arena" id="bom-arena">' +
+                '<div class="bom-bomb" id="bom-bomb">💣</div>' +
+                '<div class="bom-fuse-wrap"><div class="bom-fuse-bar" id="bom-fuse-bar"></div></div>' +
+                '<div class="bom-fuse-label" id="bom-fuse-label">導火線</div>' +
+              '</div>' +
+              '<div class="bom-hud"><span id="bom-clicks">點擊：0</span><span id="bom-booms">引爆：0</span></div>' +
+              '<div class="toy-msg" id="toy-msg-bom">瘋狂點擊炸彈充能！</div>' +
+            '</div>';
           (function() {
-            var bomb  = toyWrap.querySelector('#toy-bomb');
-            var msg   = toyWrap.querySelector('#toy-msg');
-            var scene = toyWrap.querySelector('#toy-scene');
-            var n = 0;
-            var bmsgs = ['💣 滴答…','😬 還在嗎','💣 滴答滴答…','😅 別亂按！',
-                         '🤫 裝沒事','😤 我很穩','💣 好熱…','🫠 快不行了',
-                         '🫡 使命必達','💪 我能撐住'];
-            if (bomb) bomb.addEventListener('click', function() {
-              n++;
-              if (msg) msg.textContent = bmsgs[(n-1) % bmsgs.length];
-              bomb.style.transform = 'scale(1.4) rotate('+(n*60)+'deg)';
-              setTimeout(function(){ bomb.style.transform = ''; }, 200);
-              if (scene && n % 5 === 0) {
-                var sp = document.createElement('div');
-                sp.className = 'toy-spark';
-                sp.textContent = ['💥','✨','🌟'][n%3];
-                sp.style.left = (25+Math.random()*50)+'%';
-                sp.style.top  = (20+Math.random()*40)+'%';
-                scene.appendChild(sp);
-                setTimeout(function(){ if(sp.parentNode) sp.parentNode.removeChild(sp); }, 700);
+            var bomb    = toyWrap.querySelector('#bom-bomb');
+            var fuseBar = toyWrap.querySelector('#bom-fuse-bar');
+            var label   = toyWrap.querySelector('#bom-fuse-label');
+            var clickEl = toyWrap.querySelector('#bom-clicks');
+            var boomEl  = toyWrap.querySelector('#bom-booms');
+            var msgEl   = toyWrap.querySelector('#toy-msg-bom');
+            var arena   = toyWrap.querySelector('#bom-arena');
+            var charge  = 0, clicks = 0, booms = 0, exploding = false;
+            var MAX     = 100;
+
+            var chargeMsgs = ['瘋狂點擊充能！','再用力一點！','快炸了！！','轟的一聲！','💣 引爆！'];
+            var boomMsgs   = ['💥 BOOM！','🔥 轟！','💥 再來！','🌋 爆炸！'];
+
+            function doExplode() {
+              if (exploding) return;
+              exploding = true;
+              booms++;
+              if (boomEl) boomEl.textContent = '引爆：' + booms;
+              if (msgEl)  msgEl.textContent  = boomMsgs[booms % boomMsgs.length];
+              if (bomb)   { bomb.textContent = '💥'; bomb.style.transform = 'scale(2)'; }
+              if (fuseBar) fuseBar.style.width = '100%';
+
+              // Flash the toy background
+              if (toyWrap) {
+                toyWrap.style.background = 'rgba(255,100,30,0.45)';
+                setTimeout(function() { toyWrap.style.background = ''; }, 200);
               }
+
+              // Shockwave ring
+              if (arena) {
+                var ring = document.createElement('div');
+                ring.className = 'bom-shockwave';
+                arena.appendChild(ring);
+                setTimeout(function() { if (ring.parentNode) ring.parentNode.removeChild(ring); }, 600);
+              }
+
+              // Particles fly outward at different angles
+              var emojis = ['💥','🔥','💨','⚡','🌋','✨','🔴','🟠'];
+              for (var i = 0; i < 12; i++) {
+                (function(idx) {
+                  setTimeout(function() {
+                    if (!arena) return;
+                    var p = document.createElement('div');
+                    p.className = 'bom-particle';
+                    var angle   = (idx / 12) * 360;
+                    var dist    = 40 + Math.random() * 30;
+                    p.textContent = emojis[idx % emojis.length];
+                    p.style.setProperty('--bom-dx', Math.cos(angle * Math.PI / 180) * dist + 'px');
+                    p.style.setProperty('--bom-dy', Math.sin(angle * Math.PI / 180) * dist + 'px');
+                    arena.appendChild(p);
+                    setTimeout(function() { if (p.parentNode) p.parentNode.removeChild(p); }, 750);
+                  }, idx * 25);
+                })(i);
+              }
+
+              // Reset after 950ms
+              setTimeout(function() {
+                exploding = false;
+                charge = 0;
+                if (fuseBar) fuseBar.style.width = '0%';
+                if (bomb)    { bomb.textContent = '💣'; bomb.style.transform = ''; }
+                if (label)   { label.textContent = '導火線'; label.style.color = ''; }
+              }, 950);
+            }
+
+            if (bomb) bomb.addEventListener('click', function() {
+              if (exploding) return;
+              clicks++;
+              charge = Math.min(MAX, charge + 12);
+              if (clickEl) clickEl.textContent = '點擊：' + clicks;
+              if (fuseBar) fuseBar.style.width = charge + '%';
+              // Shake bomb
+              bomb.style.transform = 'scale(1.3) rotate(' + ((clicks*33)%360) + 'deg)';
+              setTimeout(function() { if (!exploding) bomb.style.transform = ''; }, 120);
+              // Update label urgency
+              if (charge < 40)       { if (label) label.style.color = '#4ac0a0'; if(msgEl) msgEl.textContent = chargeMsgs[0]; }
+              else if (charge < 70)  { if (label) label.style.color = '#fbbf24'; if(msgEl) msgEl.textContent = chargeMsgs[1]; }
+              else if (charge < 90)  { if (label) label.style.color = '#fb923c'; if(msgEl) msgEl.textContent = chargeMsgs[2]; }
+              else                   { if (label) label.style.color = '#ef4444'; if(msgEl) msgEl.textContent = chargeMsgs[3]; }
+              if (charge >= MAX) doExplode();
             });
           })();
 

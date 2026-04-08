@@ -509,6 +509,17 @@
           <button id="btn-cupid-confirm" class="btn btn-primary" disabled>💘 射箭！確認這對情侶</button>
         </div>
       </div>
+      <!-- Cupid night toy (round 2+ when cupidDone) -->
+      <div id="ww-night-cupid-toy" class="night-subpanel hidden">
+        <div class="night-header">
+          <div class="night-moon">💘</div>
+          <h2>邱比特放下弓</h2>
+          <p class="night-hint">情侶已配對完成，享受這個夜晚吧</p>
+        </div>
+        <div class="night-toy-wrap">
+          <div class="night-toy" id="night-toy-cupid" title="點我互動"></div>
+        </div>
+      </div>
       <div id="ww-night-waiting" class="night-subpanel hidden">
         <div class="night-wait-scene">
           <div class="stars"><span>✦</span><span>✦</span><span>✦</span><span>✦</span><span>✦</span></div>
@@ -783,29 +794,56 @@
   </div>
 </div>
 
-<!-- ══ FLOATING CHAT ═══════════════════════════════════════ -->
-<div id="floating-chat" class="floating-chat hidden">
-  <div class="fc-header" id="fc-header">
-    <span class="fc-title">💬 大廳聊天室</span>
-    <div class="fc-header-actions">
+<!-- ══ UNIFIED CHAT PANEL ══════════════════════════════════ -->
+<div id="chat-panel" class="chat-panel hidden">
+  <!-- Header with tabs + controls -->
+  <div class="chat-panel-header" id="chat-panel-header">
+    <div class="chat-tab-bar">
+      <button class="chat-tab chat-tab-active" id="tab-public" data-tab="public">💬 大廳</button>
+      <!--<button class="chat-tab" id="tab-dm" data-tab="dm">🤫 私訊<span class="chat-tab-dot hidden" id="dm-tab-dot"></span></button> -->
+    </div>
+    <div class="chat-panel-actions">
       <span class="fc-online" id="fc-online-badge"></span>
-      <button class="fc-toggle-btn" id="fc-toggle-btn" title="收合">▼</button>
-      <button class="fc-close-btn" id="fc-close-btn" title="關閉">✕</button>
+      <button class="fc-toggle-btn" id="chat-panel-toggle" title="收合">▼</button>
+      <button class="fc-close-btn" id="chat-panel-close" title="關閉">✕</button>
     </div>
   </div>
-  <div class="fc-body" id="fc-body">
-    <div id="fc-messages" class="fc-messages"></div>
+
+  <!-- Public chat tab -->
+  <div id="chat-tab-public" class="chat-tab-content">
+    <div id="fc-messages" class="fc-messages chat-msgs"></div>
     <div class="fc-input-row">
       <input type="text" id="fc-input" class="fc-field" placeholder="輸入訊息…" maxlength="100" autocomplete="off">
       <button id="fc-send-btn" class="fc-send-btn">↑</button>
     </div>
   </div>
+
+  <!-- DM tab -->
+  <div id="chat-tab-dm" class="chat-tab-content hidden">
+    <!-- Picker view -->
+    <div id="dm-picker-view" class="dm-picker">
+      <div class="dm-picker-label">選擇對象發送悄悄話</div>
+      <div id="dm-player-list" class="dm-player-list"></div>
+    </div>
+    <!-- Conversation view -->
+    <div id="dm-convo-view" class="hidden">
+      <div class="dm-with-row">
+        <button class="dm-back-btn" id="dm-back-btn">← 換人</button>
+        <span class="dm-with-name" id="dm-with-name"></span>
+      </div>
+      <div id="dm-messages" class="fc-messages chat-msgs dm-msgs"></div>
+      <div class="fc-input-row">
+        <input type="text" id="dm-input" class="fc-field" placeholder="輸入悄悄話…" maxlength="100" autocomplete="off">
+        <button id="dm-send-btn" class="fc-send-btn dm-send-clr">↑</button>
+      </div>
+    </div>
+  </div>
 </div>
 
-<!-- Chat open button (shown when chat is closed/hidden) -->
-<button id="fc-open-btn" class="fc-open-btn hidden" title="開啟聊天室">
+<!-- Single chat open button -->
+<button id="chat-open-btn" class="chat-open-btn hidden" title="聊天室">
   💬
-  <span class="fc-unread-dot hidden" id="fc-unread-dot"></span>
+  <span class="chat-unread-dot hidden" id="chat-unread-dot"></span>
 </button>
 
 <!-- ══ KICKED MODAL ═══════════════════════════════════════ -->
