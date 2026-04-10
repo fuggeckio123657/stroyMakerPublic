@@ -887,3 +887,29 @@ V3.3.0 插入預言家 Modal 程式碼時，誤將原本 `if (amSeer && !amDone)
 **3. 規則混亂修改輸入框預填原句**
 
 進入「修改句子」階段時，輸入框自動填入玩家收到的原始句子，讓玩家直接在原句基礎上修改，而非面對空白框。仍使用 `data-round` key 確保每回合只預填一次，不會干擾已提交或正在編輯的內容。
+
+---
+
+## V 3.5.3 — 私訊紅點通知系統全面重構
+> 2026-04-10
+
+**問題一：未開啟聊天視窗時收到私訊，點開後 🤫 私訊 tab 沒有紅點**
+
+根本原因（雙重）：
+1. 架構上，私訊通知完全依賴「對話 watcher（watchDM）」。若玩家沒有開過某人的對話，根本沒有 Firebase 監聽器在運作，對方傳訊息時沒有任何機制能觸發紅點。
+2. 即使透過現有 `_appendDMMsg` 計入了未讀，`openBtn` 點擊時會**無條件**執行 `dmDot.classList.add('hidden')`，直接把 dm-tab-dot 隱藏掉，不管當前是否有未讀。
+
+修法：
+- **新增 `dm_inbox` 通知路徑**（`/rooms/<code>/dm_inbox/<toId>/<fromId>`）：進入房間時先清除舊通知再開始監聽（`initDMInbox`），傳送私訊時同步寫入對方 inbox（`writeDMInbox`），進入對話時清除該聯絡人的 inbox（`clearDMInbox`）。無論玩家在哪個畫面、有沒有 watcher，收到私訊都能觸發紅點。
+- **修正 `openBtn` 點擊邏輯**：移除無條件隱藏 `dm-tab-dot` 的行為。改為呼叫 `_updateDMDots()` 根據實際未讀狀態重新渲染，dm-tab-dot 只在真正沒有未讀時才消失。
+
+**問題二：關閉聊天視窗時停留在對話中（未按 ← 返回），重開後看不到新訊息**
+
+根本原因：`_openDMWith` 有「相同目標短路」邏輯——若 watcher 仍在監聽同一對象，直接 scrollTop 不重載。但這段期間 `_appendDMMsg` 只在 `convoVisible`（面板開著）時才渲染訊息到 DOM，面板關閉後到達的新訊息只計未讀不寫 DOM。重開時觸發短路，舊 DOM 不含新訊息。
+
+修法：移除短路邏輯。每次進入對話一律停止舊 watcher、清空 DOM、重建 Firebase 監聽。`limitToLast(80)` 自然 replay 所有歷史訊息（含面板關閉期間到達的），重開即可看到完整對話。
+
+**附帶改善：**
+- `_closeDMConvo`（← 換人）現在停止 watcher，picker 模式改由 `dm_inbox` 接手通知
+- 切換到私訊 tab / 開啟對話時，自動清除對應聯絡人的 `dm_inbox` 記錄與未讀計數
+- `_switchChatTab` 切換到 DM tab 後呼叫 `_updateDMDots()` 重新計算紅點，而非無條件隱藏

@@ -550,6 +550,36 @@ class FirebaseTransport {
     // Return an unsubscribe fn for when the user switches DM target
     return () => r.off('child_added', h);
   }
+
+  // ── DM Inbox (notification-only path) ─────────────────
+  // /rooms/<code>/dm_inbox/<toId>/<fromId> = { fromName, ts }
+  // Written when A sends DM to B → B gets red dot even without an active watcher.
+  // Cleared when B opens a convo with A.
+
+  writeDMInbox(code, fromId, fromName, toId) {
+    this.ref('rooms/' + code + '/dm_inbox/' + toId + '/' + fromId)
+      .set({ fromName: fromName, ts: Date.now() })
+      .catch(() => {});
+  }
+
+  clearDMInbox(code, myId, fromId) {
+    this.ref('rooms/' + code + '/dm_inbox/' + myId + '/' + fromId)
+      .remove().catch(() => {});
+  }
+
+  // Clear ALL inbox entries on join, then watch for new ones.
+  // Using child_added after the clear so only genuinely new messages fire the callback.
+  initDMInbox(code, myId, cb) {
+    var self2 = this;
+    var r     = this.ref('rooms/' + code + '/dm_inbox/' + myId);
+    // Wipe stale notifications from previous sessions, then begin watching.
+    r.remove().catch(function() {}).then(function() {
+      var h = r.on('child_added', function(snap) {
+        if (snap.exists()) cb(snap.key, snap.val());  // snap.key = fromId
+      });
+      self2._off.push(function() { r.off('child_added', h); });
+    });
+  }
 }
 
 const transport = new FirebaseTransport();
@@ -3270,13 +3300,35 @@ class UIController {
       var msgs = document.getElementById('fc-messages');
       if (msgs) msgs.innerHTML = '';
       self._chatSeenTs = 0; self._chatUnread = 0; self._dmUnread = 0;
-      self._dmTarget   = null; self._dmLoaded  = {};
+      self._dmTarget   = null; self._dmLoaded  = {}; self._dmUnreadMap = {};
       if (self._dmWatcher) { self._dmWatcher.unsubFn(); self._dmWatcher = null; }
       var dot = document.getElementById('chat-unread-dot');
       if (dot) dot.classList.add('hidden');
       var dmDot = document.getElementById('dm-tab-dot');
       if (dmDot) dmDot.classList.add('hidden');
       self._showUnifiedChat(true);
+      // Start DM inbox watcher — the only mechanism for red-dots when panel is closed.
+      // Stale entries from previous sessions are cleared before watching begins.
+      var s2 = store.get();
+      if (s2.roomCode && s2.myId) {
+        transport.initDMInbox(s2.roomCode, s2.myId, function(fromPid /*, data*/) {
+          // Receiving a dm_inbox notification means someone sent us a DM.
+          // If we're actively viewing their convo, clear the inbox entry — no dot needed.
+          if (self._chatOpen && self._activeTab === 'dm' && self._dmTarget === fromPid) {
+            transport.clearDMInbox(s2.roomCode, s2.myId, fromPid);
+            return;
+          }
+          // Otherwise accumulate unread count and show red dots.
+          if (!self._dmUnreadMap) self._dmUnreadMap = {};
+          // Set to 1 if not already counted (inbox only stores one entry per sender).
+          if (!(self._dmUnreadMap[fromPid] > 0)) self._dmUnreadMap[fromPid] = 1;
+          self._updateDMDots();
+          // Refresh picker badges live if user is on the picker view right now.
+          if (self._chatOpen && self._activeTab === 'dm' && !self._dmTarget) {
+            self._renderDMPicker();
+          }
+        });
+      }
     });
     bus.on(EVT.RETURN_LOBBY,  function() { self._showUnifiedChat(true);  });
     bus.on('room:kicked',     function() { self._showUnifiedChat(false); });
@@ -3292,18 +3344,36 @@ class UIController {
       panel.classList.remove('hidden');
       panel.classList.remove('cp-minimized');
       openBtn.classList.add('hidden');
-      self._chatOpen     = true;
+      self._chatOpen      = true;
       self._chatMinimized = false;
-      self._chatUnread   = 0; self._dmUnread = 0;
+      self._chatUnread    = 0;
+      // Hide the button-level unread dot (user has opened the panel).
       var dot = document.getElementById('chat-unread-dot');
       if (dot) dot.classList.add('hidden');
-      var dmDot = document.getElementById('dm-tab-dot');
-      if (dmDot) dmDot.classList.add('hidden');
+      // ── DO NOT unconditionally clear dm-tab-dot ──
+      // The DM tab red dot should stay visible until the user actually switches to the DM tab.
+      // Re-draw it to reflect current dm unread state.
+      self._updateDMDots();
       // Scroll public to bottom
       var msgs = document.getElementById('fc-messages');
       if (msgs) msgs.scrollTop = msgs.scrollHeight;
-      // Refresh DM picker if on DM tab
-      if (self._activeTab === 'dm' && !self._dmTarget) self._renderDMPicker();
+      if (self._activeTab === 'dm') {
+        if (self._dmTarget) {
+          // Convo visible — scroll and clear that contact's unread
+          var dmsgs = document.getElementById('dm-messages');
+          if (dmsgs) dmsgs.scrollTop = dmsgs.scrollHeight;
+          if (!self._dmUnreadMap) self._dmUnreadMap = {};
+          if (self._dmUnreadMap[self._dmTarget]) {
+            var s3 = store.get();
+            transport.clearDMInbox(s3.roomCode, s3.myId, self._dmTarget);
+            self._dmUnreadMap[self._dmTarget] = 0;
+            self._updateDMDots();
+          }
+        } else {
+          // Picker visible — refresh badges
+          self._renderDMPicker();
+        }
+      }
     });
 
     if (closeBtn) closeBtn.addEventListener('click', function() {
@@ -3377,6 +3447,8 @@ class UIController {
       var s = store.get(); if (!s.roomCode || !s.myId) return;
       inp.value = '';
       transport.pushDM(s.roomCode, s.myId, self._dmTarget, { pid: s.myId, name: s.myName || '???', text: text });
+      // Notify recipient via dm_inbox so they get a red dot even if they have no active watcher.
+      transport.writeDMInbox(s.roomCode, s.myId, s.myName || '???', self._dmTarget);
     };
     var dmSend = document.getElementById('dm-send-btn');
     if (dmSend) dmSend.addEventListener('click', sendDM);
@@ -3400,21 +3472,23 @@ class UIController {
       if (msgs) msgs.scrollTop = msgs.scrollHeight;
     }
     if (tab === 'dm') {
-      // Clear DM tab unread dot
-      var dmDot = document.getElementById('dm-tab-dot');
-      if (dmDot) dmDot.classList.add('hidden');
       this._dmUnread = 0;
-
-      // If there's an active watcher but _dmTarget is null (user pressed ← back),
-      // show picker. If watcher exists and _dmTarget is set, restore convo view.
+      // Show picker or restore convo
       if (this._dmWatcher && this._dmTarget !== null) {
-        // Convo already open — just scroll to bottom
+        // Convo already open — scroll to bottom and clear that contact's unread
         var dmsgs = document.getElementById('dm-messages');
         if (dmsgs) dmsgs.scrollTop = dmsgs.scrollHeight;
+        if (!this._dmUnreadMap) this._dmUnreadMap = {};
+        if (this._dmUnreadMap[this._dmTarget]) {
+          var st = store.get();
+          transport.clearDMInbox(st.roomCode, st.myId, this._dmTarget);
+          this._dmUnreadMap[this._dmTarget] = 0;
+        }
       } else {
-        // Show picker
         this._renderDMPicker();
       }
+      // Re-draw dots — dm-tab-dot cleared only when picker has no unreads
+      this._updateDMDots();
     }
   }
 
@@ -3475,25 +3549,21 @@ class UIController {
 
     this._dmTarget = targetId;
 
-    // Clear per-pid unread badge for this target
+    // Clear unread count for this contact and remove their dm_inbox entry.
     if (!this._dmUnreadMap) this._dmUnreadMap = {};
     this._dmUnreadMap[targetId] = 0;
+    var sOpen = store.get();
+    if (sOpen.roomCode && sOpen.myId) transport.clearDMInbox(sOpen.roomCode, sOpen.myId, targetId);
     this._updateDMDots();
 
     if (picker)   picker.classList.add('hidden');
     if (convo)    convo.classList.remove('hidden');
     if (withName) withName.textContent = '🤫 ' + targetName;
 
-    // If already watching this same target, just scroll — don't re-fetch (messages already rendered)
-    if (this._dmWatcher && this._dmWatcher.targetId === targetId) {
-      if (msgs) msgs.scrollTop = msgs.scrollHeight;
-      return;
-    }
-
-    // Stop old watcher (different target)
+    // Always stop old watcher and do a fresh Firebase reload (limitToLast(80) replays all history).
+    // This handles the case where messages arrived while panel was closed —
+    // they were never rendered to DOM, so we must reload from Firebase.
     if (this._dmWatcher) { this._dmWatcher.unsubFn(); this._dmWatcher = null; }
-
-    // Clear and reload messages for new target
     if (msgs) msgs.innerHTML = '';
 
     var s = store.get();
@@ -3506,13 +3576,14 @@ class UIController {
   }
 
   _closeDMConvo() {
-    // Do NOT clear _dmTarget — keep tracking which conversation is active for notifications
-    // Just flip the UI back to picker view
+    // Stop convo watcher — picker mode uses dm_inbox for new-message notifications.
+    // When user re-enters a convo, _openDMWith will do a fresh Firebase reload.
+    if (this._dmWatcher) { this._dmWatcher.unsubFn(); this._dmWatcher = null; }
     var picker = document.getElementById('dm-picker-view');
     var convo  = document.getElementById('dm-convo-view');
     if (picker) picker.classList.remove('hidden');
     if (convo)  convo.classList.add('hidden');
-    this._dmTarget = null;   // null means "picker visible", watcher still runs
+    this._dmTarget = null;
     this._renderDMPicker();
   }
 
