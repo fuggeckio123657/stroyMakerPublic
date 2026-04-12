@@ -3008,3 +3008,149 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }
   animation: pulse-icon .9s infinite;
 }
 
+/* ══════════════════════════════════════════════════════
+   HIDDENWOLF 隱狼 — Night Panel
+══════════════════════════════════════════════════════ */
+#ww-night-hiddenwolf { background: linear-gradient(160deg, rgba(100,80,200,.1) 0%, transparent 70%); border-radius: var(--radius-sm); }
+
+/* Awakening banner */
+.hw-awakened-banner {
+  text-align: center; padding: 12px 16px; border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, rgba(180,140,255,.25), rgba(100,60,220,.2));
+  border: 1.5px solid rgba(180,140,255,.5);
+  color: #c4b5fd; font-weight: 800; font-size: .95rem;
+  animation: hwAwakePulse 1.8s ease-in-out infinite;
+  box-shadow: 0 0 24px rgba(140,100,255,.3);
+}
+@keyframes hwAwakePulse {
+  0%,100% { box-shadow: 0 0 16px rgba(140,100,255,.25); }
+  50%      { box-shadow: 0 0 32px rgba(140,100,255,.55); }
+}
+.hw-awakened-icon { animation: hwFloat 2.5s ease-in-out infinite !important; }
+@keyframes hwFloat { 0%,100%{transform:translateY(0) rotate(-4deg)} 50%{transform:translateY(-8px) rotate(4deg)} }
+.hw-awakened-title { color: #c4b5fd !important; }
+
+/* Teammate status panel */
+.hw-teammate-section { margin: 8px 0; }
+.hw-section-label {
+  font-size: .68rem; font-weight: 700; color: var(--txt2);
+  text-transform: uppercase; letter-spacing: .1em; margin-bottom: 6px;
+}
+.hw-kill-section { margin: 8px 0; }
+.hw-teammate-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-radius: 8px;
+  background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);
+  margin-bottom: 4px;
+}
+.hw-teammate-row.hw-alive { border-color: rgba(74,192,160,.2); }
+.hw-teammate-row.hw-dead  { opacity: .45; filter: grayscale(.5); }
+.hw-tm-avatar {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .72rem; font-weight: 800; color: #fff;
+}
+.hw-tm-name   { flex: 1; font-size: .85rem; color: var(--txt0); font-weight: 500; }
+.hw-tm-status { font-size: .74rem; font-weight: 600; }
+.hw-alive .hw-tm-status { color: var(--teal); }
+.hw-dead  .hw-tm-status { color: #f87171; }
+.hw-no-teammates {
+  font-size: .8rem; color: #c4b5fd; font-style: italic;
+  padding: 8px 12px; background: rgba(180,140,255,.08);
+  border-radius: 8px; border: 1px dashed rgba(180,140,255,.3);
+  text-align: center;
+}
+.hw-teammate-note {
+  font-size: .72rem; color: rgba(255,200,100,.65);
+  background: rgba(255,200,100,.07); border: 1px solid rgba(255,200,100,.2);
+  border-radius: 6px; padding: 5px 10px; margin-top: 6px; text-align: center;
+}
+
+/* Role card for hiddenwolf */
+.role-card.role-hiddenwolf {
+  border-color: rgba(140,100,255,.5);
+  background: linear-gradient(135deg, rgba(140,100,255,.08), rgba(20,19,25,.9));
+}
+.rr-row.team-wolf .rr-role-badge.hw-badge { background: rgba(140,100,255,.15); color: #c4b5fd; }
+
+
+/* ══════════════════════════════════════════════════════
+   HIDDENWOLF ROLE — 隱狼 夜晚面板
+══════════════════════════════════════════════════════ */
+
+/* Night panel tint */
+#ww-night-hiddenwolf { background: linear-gradient(160deg, rgba(100,100,180,.1) 0%, transparent 70%); border-radius: var(--radius-sm); }
+
+/* Awakening banner */
+.hw-awakened-banner {
+  text-align: center; padding: 12px 16px; border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, rgba(220,38,38,.2), rgba(120,20,20,.3));
+  border: 1.5px solid rgba(220,38,38,.5);
+  color: #fca5a5; font-weight: 800; font-size: 1rem; font-family: var(--serif);
+  animation: hwAwakenPulse 2s ease-in-out infinite;
+  box-shadow: 0 0 24px rgba(220,38,38,.2);
+}
+@keyframes hwAwakenPulse {
+  0%,100% { box-shadow: 0 0 24px rgba(220,38,38,.2); }
+  50%      { box-shadow: 0 0 40px rgba(220,38,38,.45); }
+}
+
+.hw-awakened-icon { animation: hwIconSpin 3s linear infinite !important; }
+@keyframes hwIconSpin {
+  0%   { transform: scale(1)    rotate(0deg); }
+  50%  { transform: scale(1.18) rotate(180deg); }
+  100% { transform: scale(1)    rotate(360deg); }
+}
+
+.hw-awakened-title {
+  font-family: var(--serif); font-size: 1.25rem; font-weight: 900;
+  color: #fca5a5; margin: 4px 0;
+}
+
+/* Teammate status section */
+.hw-teammate-section {
+  background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);
+  border-radius: var(--radius-sm); padding: 10px 12px;
+}
+.hw-section-label {
+  font-size: .72rem; font-weight: 700; color: var(--txt2);
+  text-transform: uppercase; letter-spacing: .07em; margin-bottom: 7px;
+}
+.hw-teammate-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 8px; border-radius: 8px; margin-bottom: 4px;
+  background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);
+}
+.hw-teammate-row:last-child { margin-bottom: 0; }
+.hw-teammate-row.hw-alive { border-color: rgba(74,192,160,.2); }
+.hw-teammate-row.hw-dead  { opacity: .55; filter: grayscale(.5); }
+.hw-tm-avatar {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .72rem; font-weight: 800; color: #fff;
+}
+.hw-tm-name   { flex: 1; font-size: .85rem; color: var(--txt0); font-weight: 500; }
+.hw-tm-status { font-size: .72rem; color: var(--txt2); white-space: nowrap; }
+.hw-alive .hw-tm-status { color: var(--teal); }
+.hw-dead  .hw-tm-status { color: #f87171; }
+
+.hw-no-teammates {
+  font-size: .82rem; color: #fca5a5; text-align: center; padding: 8px 0;
+  font-weight: 700;
+}
+
+.hw-kill-section { margin-top: 10px; }
+
+/* Teammate note below hw's role reveal */
+.hw-teammate-note {
+  font-size: .72rem; color: rgba(252,165,165,.7); text-align: center;
+  margin-top: 6px; padding: 5px 10px;
+  background: rgba(220,38,38,.07); border-radius: 8px;
+  border: 1px solid rgba(220,38,38,.2);
+}
+
+/* End screen role badge */
+.team-badge-wolf:has-text("隱狼"),
+.rr-row.team-wolf .rr-role-badge { /* inherits wolf styling */ }
+.rr-hw-badge { background: rgba(140,100,255,.18); color: #c4b5fd; }
+

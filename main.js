@@ -59,6 +59,7 @@ const ROLES = {
   bomber  : { id:'bomber',  name:'炸彈客', team:'bomber',  icon:'💣', desc:'第三方！目標：在白天被全員票出局，可單獨獲勝。被票出局時，所有投你的人一起陣亡。' },
   cupid   : { id:'cupid',   name:'邱比特', team:'village', icon:'💘', desc:'第一個夜晚指定兩名玩家為情侶（可包含自己）。若其中一位情侶死亡，另一位立刻殉情。若情侶分屬不同陣營，邱比特與兩位情侶成為第三方，勝利條件變為讓其餘所有玩家出局。' },
   gravedigger: { id:'gravedigger', name:'守墓人', team:'village', icon:'⚰️', desc:'第二夜起可得知上一白天投票放逐出局玩家的陣營。被狼人刀死、女巫毒死、或獵人射死者不算；若無人被投出局，則無任何訊息。' },
+  hiddenwolf : { id:'hiddenwolf', name:'隱狼',   team:'wolf',    icon:'🥷', desc:'狼人陣營。預言家查驗顯示「好人」（金水）。初始不參與狼人夜間投票。所有普通狼/狼王全部出局後，於下一個夜晚「覺醒」，獨自獲得開刀能力。隱狼知道自己的狼隊友是誰，但狼隊友不知道隱狼身份。' },
 };
 
 const WW_ACTION = {
@@ -89,14 +90,17 @@ const WW_ACTION = {
   HOST_FORCE_VOTE  : 'ww_host_force_vote',// host forces vote phase
   START_NIGHT      : 'ww_start_night',
   START_DISCUSS    : 'ww_start_discuss',
-  WW_RETURN_LOBBY  : 'ww_return_lobby',
+  WW_RETURN_LOBBY      : 'ww_return_lobby',
+  HIDDENWOLF_SHOOT     : 'ww_hiddenwolf_shoot',   // hiddenwolf awakened solo kill
+  HIDDENWOLF_PASS      : 'ww_hiddenwolf_pass',    // hiddenwolf passes their kill
+  HIDDENWOLF_CONFIRM   : 'ww_hiddenwolf_confirm', // hiddenwolf locks in their kill choice
 };
 
 // Sentinel value for abstain votes
 const VOTE_ABSTAIN_ID = '__abstain__';
 
 // Which roles have active night tasks (must confirm before night ends)
-const NIGHT_ACTIVE_ROLES = new Set(['wolf','wolfking','seer','witch','cupid']);
+const NIGHT_ACTIVE_ROLES = new Set(['wolf','wolfking','seer','witch','cupid','hiddenwolf']);
 
 const EVT = {
   PLAYER_JOINED     : 'player:joined',
@@ -278,6 +282,10 @@ const makeWerewolfGame = () => ({
   cupidId              : null,           // who plays cupid
   loverAcks            : {},             // { pid: true } — lover dismissed notification
   gravediggerLog       : [],             // [{round, pid, name, team}] — vote-eliminated per round
+  // ── HiddenWolf ───────────────────────────────────────────
+  hiddenwolfAwakened   : false,          // true once all normal wolves are dead and hw can kill
+  hiddenwolfShot       : null,           // pid hw killed this night (resolved in _resolveNight)
+  hiddenwolfDone       : false,          // hw confirmed action this night
 });
 
 class Store {
@@ -306,7 +314,7 @@ const store = new Store({
     rounds     : CONFIG.DEFAULT_ROUNDS,
     turnTime   : CONFIG.DEFAULT_TURN_TIME,
     maxPlayers : 12,
-    wwConfig   : { roles: { wolf:2, wolfking:0, seer:1, witch:1, hunter:1, knight:0, bomber:0, cupid:0 }, nightTime: 30, voteTime: 60 },
+    wwConfig   : { roles: { wolf:2, wolfking:0, seer:1, witch:1, hunter:1, knight:0, bomber:0, cupid:0, hiddenwolf:0 }, nightTime: 30, voteTime: 60 },
   },
   game       : makeGame(),
 });
@@ -547,14 +555,13 @@ class FirebaseTransport {
       if (snap.exists()) cb(snap.val());
     });
     this._off.push(() => r.off('child_added', h));
-    // Return an unsubscribe fn for when the user switches DM target
     return () => r.off('child_added', h);
   }
 
-  // ── DM Inbox (notification-only path) ─────────────────
+  // ── DM Inbox (notification-only path) ─────────────────────────────
   // /rooms/<code>/dm_inbox/<toId>/<fromId> = { fromName, ts }
-  // Written when A sends DM to B → B gets red dot even without an active watcher.
-  // Cleared when B opens a convo with A.
+  // Written on send → recipient gets red dot regardless of active watcher.
+  // Uses startAt(joinTs) so old notifications from prior sessions don't fire.
 
   writeDMInbox(code, fromId, fromName, toId) {
     this.ref('rooms/' + code + '/dm_inbox/' + toId + '/' + fromId)
@@ -567,17 +574,20 @@ class FirebaseTransport {
       .remove().catch(() => {});
   }
 
-  // Clear ALL inbox entries on join, then watch for new ones.
-  // Using child_added after the clear so only genuinely new messages fire the callback.
-  initDMInbox(code, myId, cb) {
+  // Watch dm_inbox with timestamp filter — no remove needed, stale entries ignored.
+  watchDMInbox(code, myId, minTs, cb) {
     var self2 = this;
-    var r     = this.ref('rooms/' + code + '/dm_inbox/' + myId);
-    // Wipe stale notifications from previous sessions, then begin watching.
-    r.remove().catch(function() {}).then(function() {
-      var h = r.on('child_added', function(snap) {
-        if (snap.exists()) cb(snap.key, snap.val());  // snap.key = fromId
-      });
-      self2._off.push(function() { r.off('child_added', h); });
+    var r = this.ref('rooms/' + code + '/dm_inbox/' + myId);
+    // orderByChild('ts').startAt(minTs) ensures only NEW notifications fire
+    var h1 = r.orderByChild('ts').startAt(minTs).on('child_added', function(snap) {
+      if (snap.exists()) cb(snap.key, snap.val());
+    });
+    var h2 = r.orderByChild('ts').startAt(minTs).on('child_changed', function(snap) {
+      if (snap.exists()) cb(snap.key, snap.val());
+    });
+    self2._off.push(function() {
+      r.off('child_added',  h1);
+      r.off('child_changed', h2);
     });
   }
 }
@@ -1057,6 +1067,9 @@ class WerewolfEngine {
     else if (t === WW_ACTION.START_NIGHT)      this._startNight();
     else if (t === WW_ACTION.START_DISCUSS)    this._startDiscuss();
     else if (t === WW_ACTION.WW_RETURN_LOBBY)  roomManager.returnToLobby();
+    else if (t === WW_ACTION.HIDDENWOLF_SHOOT)   this._hiddenwolfShoot(pid, a.targetId);
+    else if (t === WW_ACTION.HIDDENWOLF_PASS)    this._hiddenwolfPass(pid);
+    else if (t === WW_ACTION.HIDDENWOLF_CONFIRM) this._hiddenwolfConfirm(pid);
   }
 
   // ── Game Start ────────────────────────────────────────
@@ -1100,8 +1113,19 @@ class WerewolfEngine {
     // Pre-confirm cupid on rounds > 1 (their action only applies round 1)
     const preConfirm = {};
     if (g.cupidId && g.cupidDone) preConfirm[g.cupidId] = true;
-    // Gravedigger is now fully passive (like villager) — auto-confirms each night
-    // No pre-confirm needed; they confirm via btn-gravedigger-done button
+
+    // ── HiddenWolf awakening check ────────────────────────
+    // Check if hiddenwolf should awaken: awakened when ALL normal kill-capable wolves are dead.
+    // Kill-capable wolves = wolf + wolfking (NOT hiddenwolf itself).
+    const hwPid = Object.keys(g.roles || {}).find(id => g.roles[id] === 'hiddenwolf');
+    const aliveNormalWolves = Object.keys(g.roles || {}).filter(
+      id => g.alive[id] && (g.roles[id] === 'wolf' || g.roles[id] === 'wolfking')
+    );
+    // hiddenwolf awakens if: hw exists, hw is alive, all normal wolves are dead
+    const hwAwakened = !!(hwPid && g.alive[hwPid] && aliveNormalWolves.length === 0);
+
+    // Pre-confirm hiddenwolf if NOT awakened (not yet able to kill)
+    if (hwPid && g.alive[hwPid] && !hwAwakened) preConfirm[hwPid] = true;
 
     store.patchGame({
       wwPhase              : 'night',
@@ -1120,6 +1144,9 @@ class WerewolfEngine {
       voteLocked           : {},
       voteEliminated       : null,
       nightTimeLeft        : g.nightTime,
+      hiddenwolfAwakened   : hwAwakened,
+      hiddenwolfShot       : null,
+      hiddenwolfDone       : false,
     });
     this.broadcast();
     this._startNightTimer();
@@ -1163,7 +1190,7 @@ class WerewolfEngine {
     const g = store.get().game;
     if (g.wwPhase !== 'night') return;
     const r = g.roles[pid];
-    if (r !== 'wolf' && r !== 'wolfking') return;
+    if (r !== 'wolf' && r !== 'wolfking') return;  // hiddenwolf excluded from wolf vote
     // Target must be alive (wolves CAN vote for themselves or fellow wolves)
     if (!g.alive[targetId]) return;
 
@@ -1180,7 +1207,7 @@ class WerewolfEngine {
   _wolfConfirm(pid) {
     const g = store.get().game;
     if (g.wwPhase !== 'night' || g.wolfConfirmed) return;
-    if (g.roles[pid] !== 'wolf' && g.roles[pid] !== 'wolfking') return;
+    if (g.roles[pid] !== 'wolf' && g.roles[pid] !== 'wolfking') return;  // hw excluded
     if (!Object.keys(g.wolfVotes).length) return;
 
     const tally = {};
@@ -1209,6 +1236,7 @@ class WerewolfEngine {
     if (!g.alive[targetId] || g.seerCheckedThisRound) return;
 
     const r       = g.roles[targetId];
+    // hiddenwolf appears as 'good' to seer (golden water passive)
     const result  = (r === 'wolf' || r === 'wolfking') ? 'bad' : 'good';
     const results = Object.assign({}, g.seerResults, { [targetId]: result });
     store.patchGame({ seerResults: results, seerCheckedThisRound: targetId });
@@ -1304,7 +1332,7 @@ class WerewolfEngine {
     if (sel.length !== 2) return;
     const [p1, p2] = sel;
     // Determine loverTeam
-    const isWolf = r => r === 'wolf' || r === 'wolfking';
+    const isWolf = r => r === 'wolf' || r === 'wolfking' || r === 'hiddenwolf';
     const p1Wolf = isWolf(g.roles[p1]);
     const p2Wolf = isWolf(g.roles[p2]);
     let loverTeam = 'village';
@@ -1375,8 +1403,17 @@ class WerewolfEngine {
       deathLog[g.wolfkingSecretTarget] = '被狼王秘密帶走';
     }
 
+    // HiddenWolf solo kill (only when awakened)
+    // witchSave blocks hw kill too (witch sees target but not identity of killer)
+    if (g.hiddenwolfAwakened && g.hiddenwolfShot && alive[g.hiddenwolfShot] && !g.witchSave) {
+      alive[g.hiddenwolfShot] = false;
+      died.push(g.hiddenwolfShot);
+      deathLog[g.hiddenwolfShot] = '被狼人獵殺';  // displayed as generic wolf kill (identity hidden)
+    }
+
     // Check if hunter was wolf-killed (not witch) → will trigger special after announce
-    const hunterWolfKilled = g.wolfTarget && !g.witchSave && g.roles[g.wolfTarget] === 'hunter';
+    const hunterWolfKilled = (g.wolfTarget && !g.witchSave && g.roles[g.wolfTarget] === 'hunter')
+      || (g.hiddenwolfAwakened && g.hiddenwolfShot && g.roles[g.hiddenwolfShot] === 'hunter');
 
     // Lover propagation: if a lover died tonight, kill the other (殉情)
     // But if the killed-by-love player is a hunter, block their shoot ability
@@ -1392,6 +1429,7 @@ class WerewolfEngine {
       wolfkingSecretTarget: null,
       wolfkingSecretReady : g.wolfkingSecretReady,
       ...(hunterWolfKilled ? { hunterCanShoot: true, hunterShootCause: 'wolf' } : {}),
+      hiddenwolfShot: null,
     });
     this.broadcast();
     setTimeout(() => {
@@ -1484,7 +1522,7 @@ class WerewolfEngine {
     if (!g.knightRevealed) return; // must reveal first
 
     const targetRole = g.roles[targetId];
-    const isWolf     = targetRole === 'wolf' || targetRole === 'wolfking';
+    const isWolf     = targetRole === 'wolf' || targetRole === 'wolfking' || targetRole === 'hiddenwolf';
     const alive      = Object.assign({}, g.alive);
     const deathLog   = Object.assign({}, g.deathLog);
     const challengeLog = { knightId: pid, targetId, result: isWolf ? 'hit' : 'miss', targetRole };
@@ -1616,13 +1654,14 @@ class WerewolfEngine {
     if (role !== 'hunter') this._propagateLoverDeath(alive, deathLog, store.get().game);
 
     // Task 6: Record for gravedigger — determine team of eliminated
+    // hiddenwolf belongs to wolf team but ROLES has team:'wolf', so no special case needed.
     const elimRole = ROLES[role] || ROLES.villager;
     const { players } = store.get();
     const gravediggerLog = [...(g.gravediggerLog || []), {
       round : g.wwRound,
       pid   : eliminated,
       name  : (players[eliminated] || {}).name || eliminated,
-      team  : elimRole.team,
+      team  : elimRole.team,  // hiddenwolf → 'wolf' (correctly identified for gravedigger)
     }];
 
     store.patchGame({ alive, deathLog, wwPhase: 'vote_result', voteEliminated: eliminated, voteVoters: voters, abstainCount, gravediggerLog });
@@ -1636,6 +1675,43 @@ class WerewolfEngine {
         this._startNight();
       }
     }, 3500);
+  }
+
+  // ── HiddenWolf ───────────────────────────────────────────
+
+  _hiddenwolfShoot(pid, targetId) {
+    const g = store.get().game;
+    if (g.wwPhase !== 'night') return;
+    if (g.roles[pid] !== 'hiddenwolf' || !g.alive[pid]) return;
+    if (!g.hiddenwolfAwakened) return;  // not yet awakened
+    if (g.hiddenwolfDone) return;       // already acted this night
+    if (!g.alive[targetId] || targetId === pid) return;
+    // Toggle: click same target to deselect
+    const newShot = g.hiddenwolfShot === targetId ? null : targetId;
+    store.patchGame({ hiddenwolfShot: newShot });
+    this.broadcast();
+  }
+
+  _hiddenwolfPass(pid) {
+    const g = store.get().game;
+    if (g.wwPhase !== 'night') return;
+    if (g.roles[pid] !== 'hiddenwolf' || !g.alive[pid]) return;
+    if (!g.hiddenwolfAwakened) return;
+    if (g.hiddenwolfDone) return;
+    // Pass: confirm without killing
+    store.patchGame({ hiddenwolfShot: null });
+    this._confirmPlayer(pid);
+  }
+
+  // Called when hw confirms their kill choice
+  _hiddenwolfConfirm(pid) {
+    const g = store.get().game;
+    if (g.wwPhase !== 'night') return;
+    if (g.roles[pid] !== 'hiddenwolf' || !g.alive[pid]) return;
+    if (!g.hiddenwolfAwakened) return;
+    if (g.hiddenwolfDone) return;
+    store.patchGame({ hiddenwolfDone: true });
+    this._confirmPlayer(pid);
   }
 
   // ── WolfKing posthumous ───────────────────────────────
@@ -1726,7 +1802,7 @@ class WerewolfEngine {
     const loverTeam = g.loverTeam;   // 'village' | 'wolf' | 'third' | null
     const cupidId   = g.cupidId;
 
-    const isWolf = id => roles[id] === 'wolf' || roles[id] === 'wolfking';
+    const isWolf = id => roles[id] === 'wolf' || roles[id] === 'wolfking' || roles[id] === 'hiddenwolf';
     const aliveWolves = alivePids.filter(isWolf);
 
     // Are both lovers still alive? (crucial gatekeeper)
@@ -2489,6 +2565,9 @@ class UIController {
           const el = document.getElementById('ww-count-' + rid);
           if (el) el.textContent = roles[rid] || 0;
         });
+        // Hiddenwolf counter sync (in case not in ROLES iteration order)
+        var hwEl = document.getElementById('ww-count-hiddenwolf');
+        if (hwEl) hwEl.textContent = roles['hiddenwolf'] || 0;
         const nte = document.getElementById('ww-night-time');
         if (nte) nte.value = wwCfg.nightTime || 30;
       }
@@ -2927,7 +3006,7 @@ class UIController {
         var wwCfg   = s.wwConfig || {};
         var roles   = Object.assign({}, (wwCfg.roles) || {});
         var current = roles[roleId] || 0;
-        var isWolf  = roleId === 'wolf' || roleId === 'wolfking';
+        var isWolf  = roleId === 'wolf' || roleId === 'wolfking' || roleId === 'hiddenwolf';
         var max     = isWolf ? 6 : 2;
         roles[roleId] = Math.max(0, Math.min(max, current + dir));
         var newSettings = Object.assign({}, s, { wwConfig: Object.assign({}, wwCfg, { roles }) });
@@ -3299,31 +3378,30 @@ class UIController {
     bus.on(EVT.ROOM_JOINED, function() {
       var msgs = document.getElementById('fc-messages');
       if (msgs) msgs.innerHTML = '';
-      self._chatSeenTs = 0; self._chatUnread = 0; self._dmUnread = 0;
-      self._dmTarget   = null; self._dmLoaded  = {}; self._dmUnreadMap = {};
+      self._chatSeenTs  = 0; self._chatUnread = 0; self._dmUnread = 0;
+      self._dmTarget    = null; self._dmLoaded = {}; self._dmUnreadMap = {};
       if (self._dmWatcher) { self._dmWatcher.unsubFn(); self._dmWatcher = null; }
       var dot = document.getElementById('chat-unread-dot');
       if (dot) dot.classList.add('hidden');
       var dmDot = document.getElementById('dm-tab-dot');
       if (dmDot) dmDot.classList.add('hidden');
       self._showUnifiedChat(true);
-      // Start DM inbox watcher — the only mechanism for red-dots when panel is closed.
-      // Stale entries from previous sessions are cleared before watching begins.
+      // Start dm_inbox watcher — fires for any DM sent to me, even without an open convo watcher.
+      // Using startAt(joinTs) so stale notifications from previous sessions are ignored entirely.
+      var joinTs = Date.now();
       var s2 = store.get();
       if (s2.roomCode && s2.myId) {
-        transport.initDMInbox(s2.roomCode, s2.myId, function(fromPid /*, data*/) {
-          // Receiving a dm_inbox notification means someone sent us a DM.
-          // If we're actively viewing their convo, clear the inbox entry — no dot needed.
+        transport.watchDMInbox(s2.roomCode, s2.myId, joinTs, function(fromPid /*, data*/) {
+          // Already viewing this person's convo and panel is open → clear inbox, no dot needed
           if (self._chatOpen && self._activeTab === 'dm' && self._dmTarget === fromPid) {
             transport.clearDMInbox(s2.roomCode, s2.myId, fromPid);
             return;
           }
-          // Otherwise accumulate unread count and show red dots.
           if (!self._dmUnreadMap) self._dmUnreadMap = {};
-          // Set to 1 if not already counted (inbox only stores one entry per sender).
+          // Set to 1 per sender (inbox stores latest only; don't double-count)
           if (!(self._dmUnreadMap[fromPid] > 0)) self._dmUnreadMap[fromPid] = 1;
           self._updateDMDots();
-          // Refresh picker badges live if user is on the picker view right now.
+          // Refresh picker badges live if user is on DM picker view
           if (self._chatOpen && self._activeTab === 'dm' && !self._dmTarget) {
             self._renderDMPicker();
           }
@@ -3344,42 +3422,53 @@ class UIController {
       panel.classList.remove('hidden');
       panel.classList.remove('cp-minimized');
       openBtn.classList.add('hidden');
-      self._chatOpen      = true;
+      self._chatOpen     = true;
       self._chatMinimized = false;
-      self._chatUnread    = 0;
-      // Hide the button-level unread dot (user has opened the panel).
+      self._chatUnread   = 0;
       var dot = document.getElementById('chat-unread-dot');
       if (dot) dot.classList.add('hidden');
-      // ── DO NOT unconditionally clear dm-tab-dot ──
-      // The DM tab red dot should stay visible until the user actually switches to the DM tab.
-      // Re-draw it to reflect current dm unread state.
+      // Don't blindly clear dm-tab-dot; let _updateDMDots re-draw based on actual unread state
       self._updateDMDots();
       // Scroll public to bottom
       var msgs = document.getElementById('fc-messages');
       if (msgs) msgs.scrollTop = msgs.scrollHeight;
-      if (self._activeTab === 'dm') {
-        if (self._dmTarget) {
-          // Convo visible — scroll and clear that contact's unread
-          var dmsgs = document.getElementById('dm-messages');
-          if (dmsgs) dmsgs.scrollTop = dmsgs.scrollHeight;
-          if (!self._dmUnreadMap) self._dmUnreadMap = {};
-          if (self._dmUnreadMap[self._dmTarget]) {
-            var s3 = store.get();
-            transport.clearDMInbox(s3.roomCode, s3.myId, self._dmTarget);
-            self._dmUnreadMap[self._dmTarget] = 0;
-            self._updateDMDots();
-          }
-        } else {
-          // Picker visible — refresh badges
-          self._renderDMPicker();
-        }
-      }
+      // activeTab is always 'public' when panel was closed via ✕ button
+      // (we reset to public in closeBtn handler). Just scroll public to bottom.
+      // If user was on DM tab when they closed, they'll land on public on reopen —
+      // DM red dot remains visible on the tab until they switch to it.
     });
 
     if (closeBtn) closeBtn.addEventListener('click', function() {
       if (panel) panel.classList.add('hidden');
       if (openBtn) openBtn.classList.remove('hidden');
       self._chatOpen = false;
+
+      // Bug 3 fix: if closing while in a DM convo (without pressing ←),
+      // navigate back to public tab NOW (on close) so that:
+      // 1. Red dot appears correctly on reopen
+      // 2. Panel reopens on public chat, not stuck in DM convo view
+      if (self._activeTab === 'dm') {
+        // Stop DM watcher
+        if (self._dmWatcher) { self._dmWatcher.unsubFn(); self._dmWatcher = null; }
+        // Reset convo state
+        self._dmTarget = null;
+        // Reset DM UI to picker
+        var picker = document.getElementById('dm-picker-view');
+        var convo  = document.getElementById('dm-convo-view');
+        if (picker) picker.classList.remove('hidden');
+        if (convo)  convo.classList.add('hidden');
+        // Switch activeTab to public so panel reopens on public chat
+        self._activeTab = 'public';
+        var pubContent = document.getElementById('chat-tab-public');
+        var dmContent  = document.getElementById('chat-tab-dm');
+        if (pubContent) pubContent.classList.remove('hidden');
+        if (dmContent)  dmContent.classList.add('hidden');
+        document.querySelectorAll('.chat-tab').forEach(function(b) {
+          b.classList.toggle('chat-tab-active', b.getAttribute('data-tab') === 'public');
+        });
+      }
+      // Update dots: dm_inbox watcher keeps running and will show dot for any unread DMs
+      self._updateDMDots();
     });
 
     if (toggleBtn) toggleBtn.addEventListener('click', function() {
@@ -3447,7 +3536,7 @@ class UIController {
       var s = store.get(); if (!s.roomCode || !s.myId) return;
       inp.value = '';
       transport.pushDM(s.roomCode, s.myId, self._dmTarget, { pid: s.myId, name: s.myName || '???', text: text });
-      // Notify recipient via dm_inbox so they get a red dot even if they have no active watcher.
+      // Notify recipient via dm_inbox so they get a red dot even without an active watcher
       transport.writeDMInbox(s.roomCode, s.myId, s.myName || '???', self._dmTarget);
     };
     var dmSend = document.getElementById('dm-send-btn');
@@ -3472,23 +3561,21 @@ class UIController {
       if (msgs) msgs.scrollTop = msgs.scrollHeight;
     }
     if (tab === 'dm') {
+      // Clear DM tab unread dot
+      var dmDot = document.getElementById('dm-tab-dot');
+      if (dmDot) dmDot.classList.add('hidden');
       this._dmUnread = 0;
-      // Show picker or restore convo
+
+      // If there's an active watcher but _dmTarget is null (user pressed ← back),
+      // show picker. If watcher exists and _dmTarget is set, restore convo view.
       if (this._dmWatcher && this._dmTarget !== null) {
-        // Convo already open — scroll to bottom and clear that contact's unread
+        // Convo already open — just scroll to bottom
         var dmsgs = document.getElementById('dm-messages');
         if (dmsgs) dmsgs.scrollTop = dmsgs.scrollHeight;
-        if (!this._dmUnreadMap) this._dmUnreadMap = {};
-        if (this._dmUnreadMap[this._dmTarget]) {
-          var st = store.get();
-          transport.clearDMInbox(st.roomCode, st.myId, this._dmTarget);
-          this._dmUnreadMap[this._dmTarget] = 0;
-        }
       } else {
+        // Show picker
         this._renderDMPicker();
       }
-      // Re-draw dots — dm-tab-dot cleared only when picker has no unreads
-      this._updateDMDots();
     }
   }
 
@@ -3549,7 +3636,7 @@ class UIController {
 
     this._dmTarget = targetId;
 
-    // Clear unread count for this contact and remove their dm_inbox entry.
+    // Clear unread count and remove dm_inbox notification for this contact
     if (!this._dmUnreadMap) this._dmUnreadMap = {};
     this._dmUnreadMap[targetId] = 0;
     var sOpen = store.get();
@@ -3560,10 +3647,16 @@ class UIController {
     if (convo)    convo.classList.remove('hidden');
     if (withName) withName.textContent = '🤫 ' + targetName;
 
-    // Always stop old watcher and do a fresh Firebase reload (limitToLast(80) replays all history).
-    // This handles the case where messages arrived while panel was closed —
-    // they were never rendered to DOM, so we must reload from Firebase.
+    // If already watching this same target, just scroll — don't re-fetch (messages already rendered)
+    if (this._dmWatcher && this._dmWatcher.targetId === targetId) {
+      if (msgs) msgs.scrollTop = msgs.scrollHeight;
+      return;
+    }
+
+    // Stop old watcher (different target)
     if (this._dmWatcher) { this._dmWatcher.unsubFn(); this._dmWatcher = null; }
+
+    // Clear and reload messages for new target
     if (msgs) msgs.innerHTML = '';
 
     var s = store.get();
@@ -3576,14 +3669,13 @@ class UIController {
   }
 
   _closeDMConvo() {
-    // Stop convo watcher — picker mode uses dm_inbox for new-message notifications.
-    // When user re-enters a convo, _openDMWith will do a fresh Firebase reload.
-    if (this._dmWatcher) { this._dmWatcher.unsubFn(); this._dmWatcher = null; }
+    // Do NOT clear _dmTarget — keep tracking which conversation is active for notifications
+    // Just flip the UI back to picker view
     var picker = document.getElementById('dm-picker-view');
     var convo  = document.getElementById('dm-convo-view');
     if (picker) picker.classList.remove('hidden');
     if (convo)  convo.classList.add('hidden');
-    this._dmTarget = null;
+    this._dmTarget = null;   // null means "picker visible", watcher still runs
     this._renderDMPicker();
   }
 
@@ -4517,30 +4609,41 @@ class UIController {
     const myRole   = (g.roles || {})[myId];
     const roleDef  = ROLES[myRole] || ROLES.villager;
     const isWolf   = roleDef.team === 'wolf';
+    const isHW     = myRole === 'hiddenwolf';
 
     this._setText('ww-role-icon', roleDef.icon);
     this._setText('ww-role-name', roleDef.name);
-    this._setText('ww-role-team', isWolf ? '⚠️ 狼人陣營' : '✦ 村民陣營');
+    // hiddenwolf shows as wolf team internally but seer sees them as village
+    var teamLabel = isHW ? '⚠️ 狼人陣營（預言家驗為金水）' : (isWolf ? '⚠️ 狼人陣營' : '✦ 村民陣營');
+    this._setText('ww-role-team', teamLabel);
     this._setText('ww-role-desc', roleDef.desc);
 
     var card = document.getElementById('ww-role-card');
     if (card) {
-      card.className = 'role-card role-' + (isWolf ? 'wolf' : 'village');
+      var cardTeam = myRole === 'hiddenwolf' ? 'hiddenwolf' : (isWolf ? 'wolf' : 'village');
+      card.className = 'role-card role-' + cardTeam;
     }
 
     // Show teammates for wolves
+    // hiddenwolf sees all wolf/wolfking teammates, but normal wolves do NOT see hiddenwolf
+    var isHiddenWolf = myRole === 'hiddenwolf';
     var teammates = Object.entries(g.roles || {}).filter(function([pid, r]) {
+      if (isHiddenWolf) return pid !== myId && (r === 'wolf' || r === 'wolfking');
+      // Normal wolves: exclude hiddenwolf from their teammate list (they don't know hw)
       return pid !== myId && (r === 'wolf' || r === 'wolfking');
     });
-    this._show('ww-wolf-teammates', isWolf && teammates.length > 0);
+    this._show('ww-wolf-teammates', (isWolf || isHiddenWolf) && teammates.length > 0);
     var tl = document.getElementById('ww-teammates-list');
-    if (tl && isWolf) {
+    if (tl && (isWolf || isHiddenWolf)) {
       tl.innerHTML = teammates.map(function([pid]) {
         var p = players[pid] || {};
         var r = ROLES[g.roles[pid]] || {};
         return '<span class="teammate-chip"><span>' + Utils.escapeHtml(p.name || pid) + '</span>' +
                '<span class="teammate-role">' + (r.icon || '') + (r.name || '') + '</span></span>';
       }).join('');
+      if (isHiddenWolf && teammates.length > 0) {
+        tl.innerHTML += '<div class="hw-teammate-note">⚠️ 你的隊友並不知道你是隱狼</div>';
+      }
     }
 
     // Only host sees "start night" button; others wait
@@ -4549,31 +4652,34 @@ class UIController {
   }
 
   _renderWWNight(g, myId, players) {
-    const myRole   = (g.roles || {})[myId];
-    const amWolf   = myRole === 'wolf' || myRole === 'wolfking';
-    const amSeer   = myRole === 'seer';
-    const amWitch  = myRole === 'witch';
-    const amHunter = myRole === 'hunter';
-    const amGD     = myRole === 'gravedigger';
-    const isActive = NIGHT_ACTIVE_ROLES.has(myRole);
-    const amDone   = !!(g.nightConfirmed || {})[myId];
-    const amCupid  = myRole === 'cupid';
+    const myRole      = (g.roles || {})[myId];
+    const amWolf      = myRole === 'wolf' || myRole === 'wolfking';
+    const amSeer      = myRole === 'seer';
+    const amWitch     = myRole === 'witch';
+    const amHunter    = myRole === 'hunter';
+    const amGD        = myRole === 'gravedigger';
+    const amHiddenWolf= myRole === 'hiddenwolf';
+    const isActive    = NIGHT_ACTIVE_ROLES.has(myRole);
+    const amDone      = !!(g.nightConfirmed || {})[myId];
+    const amCupid     = myRole === 'cupid';
     // gravedigger is passive — doesn't block night end, always sees their panel
-    const isPassive = !isActive && !amHunter && !amCupid && !amGD;
+    const isPassive   = !isActive && !amHunter && !amCupid && !amGD && !amHiddenWolf;
 
     this._show('ww-night-wolf',        amWolf   && !amDone);
     this._show('ww-night-seer',        amSeer   && !amDone);
     this._show('ww-night-witch',       amWitch  && !amDone);
     this._show('ww-night-hunter',      amHunter && !amDone);
     this._show('ww-night-cupid',       amCupid  && !amDone && !g.cupidDone);
-    this._show('ww-night-cupid-toy',   amCupid  && g.cupidDone);  // arrow gallery after firing
-    // Gravedigger sees their panel every night (round 1 = no info, still has the mini-game)
+    this._show('ww-night-cupid-toy',   amCupid  && g.cupidDone);
     this._show('ww-night-gravedigger', amGD);
+    // HiddenWolf: always shows their status panel; kill panel only when awakened
+    // HiddenWolf always sees their status panel (like gravedigger) — kill panel when awakened
+    this._show('ww-night-hiddenwolf',  amHiddenWolf);
     this._show('ww-night-passive',     isPassive && !amDone);
-    // Waiting scene: active role done OR passive/hunter/cupid confirmed
-    // Gravedigger never goes to waiting (they can enjoy the mini-game all night)
+    // Waiting scene: active role done (includes hw after confirming)
+    // HiddenWolf: when not awakened they show their status panel, not the waiting scene
     this._show('ww-night-waiting',
-      (isActive && amDone) ||
+      (isActive && amDone && !(amHiddenWolf && !g.hiddenwolfAwakened)) ||
       ((isPassive || amHunter || amCupid) && amDone)
     );
 
@@ -4675,6 +4781,121 @@ class UIController {
           setTimeout(spawnGhost, 600);
           setTimeout(spawnGhost, 1600);
         })();
+      }
+    }
+
+    // ── HiddenWolf night panel ──────────────────────────────
+    if (amHiddenWolf) {
+      var hwPanel = document.getElementById('ww-night-hiddenwolf');
+      if (hwPanel) {
+        var hwAwakened = !!g.hiddenwolfAwakened;
+        var hwDone     = !!amDone;  // true when hw pre-confirmed (not awakened) or after confirming kill
+        var hwShot     = g.hiddenwolfShot || null;
+        // Build teammate status list
+        var hwTeammates = Object.keys(g.roles || {}).filter(function(pid) {
+          return g.roles[pid] === 'wolf' || g.roles[pid] === 'wolfking';
+        });
+        var teammateHtml = hwTeammates.length === 0
+          ? '<div class="hw-no-teammates">所有普通狼隊友已全部出局</div>'
+          : hwTeammates.map(function(pid) {
+              var p = players[pid] || {};
+              var alive2 = !!(g.alive || {})[pid];
+              return '<div class="hw-teammate-row ' + (alive2 ? 'hw-alive' : 'hw-dead') + '">' +
+                '<div class="hw-tm-avatar" style="background:' + Utils.avatarColor(p.name||pid) + '">' + (p.name||'?')[0] + '</div>' +
+                '<span class="hw-tm-name">' + Utils.escapeHtml(p.name||pid) + '</span>' +
+                '<span class="hw-tm-status">' + (alive2 ? '✅ 存活' : '💀 死亡') + '</span>' +
+              '</div>';
+            }).join('');
+
+        // dataKey: state signature — rebuild when state changes
+        // Include hwDone so the panel updates after confirming
+        var dataKey = (hwAwakened ? 'awk' : 'sleep') + ':' + hwDone + ':' + hwShot + ':' + Object.values(g.alive||{}).join('');
+        if (hwPanel.getAttribute('data-hw-key') !== dataKey) {
+          hwPanel.setAttribute('data-hw-key', dataKey);
+
+          if (!hwAwakened) {
+            // ── Not awakened: show status panel + moon toy ────────────
+            // amDone is always true here (pre-confirmed by _startNight)
+            hwPanel.innerHTML =
+              '<div class="night-header" style="padding-bottom:4px">' +
+                '<div class="night-moon" style="font-size:2rem">🥷</div>' +
+                '<h2 style="font-family:var(--serif);color:var(--gold2)">隱狼，請閉上眼睛</h2>' +
+                '<p class="night-hint">你的開刀權尚未覺醒。只要場上還有普通狼存活，靜靜等待即可。</p>' +
+              '</div>' +
+              '<div class="hw-teammate-section"><div class="hw-section-label">🐺 狼隊友狀態</div>' + teammateHtml + '</div>' +
+              '<div class="night-toy-wrap">' +
+                '<div class="night-toy" id="night-toy-hiddenwolf" title="點我互動" data-toy-role="hiddenwolf"></div>' +
+              '</div>';
+            // Init moon toy
+            var hwToy = document.getElementById('night-toy-hiddenwolf');
+            if (hwToy && hwToy.getAttribute('data-init') !== '1') {
+              hwToy.setAttribute('data-init', '1');
+              hwToy.innerHTML =
+                '<div class="toy-scene">' +
+                  '<div class="toy-star ts1">✦</div><div class="toy-star ts2">✧</div>' +
+                  '<div class="toy-star ts3">✦</div><div class="toy-star ts4">✧</div>' +
+                  '<div class="toy-moon" id="toy-moon-hw">🌕</div>' +
+                  '<div class="toy-cloud tc1">☁</div><div class="toy-cloud tc2">☁</div>' +
+                '</div>' +
+                '<div class="toy-msg" id="toy-msg-hw">靜靜等待隊友的消息…</div>';
+              var moonHW = hwToy.querySelector('#toy-moon-hw');
+              var msgHW  = hwToy.querySelector('#toy-msg-hw');
+              var moons  = ['🌕','🌖','🌗','🌘','🌑','🌒','🌓','🌔'];
+              var mi = 0;
+              var hwMsgs = ['守望月亮…','靜靜潛伏中…','等待時機…','你是最終的牌…','一切盡在掌握…'];
+              if (moonHW) moonHW.addEventListener('click', function() {
+                mi = (mi + 1) % moons.length;
+                moonHW.textContent = moons[mi];
+                if (msgHW) msgHW.textContent = hwMsgs[mi % hwMsgs.length];
+                var spark = document.createElement('div');
+                spark.className = 'toy-spark';
+                spark.textContent = '🥷';
+                spark.style.left = (30 + Math.random() * 40) + '%';
+                spark.style.top  = (20 + Math.random() * 30) + '%';
+                hwToy.appendChild(spark);
+                setTimeout(function() { if (spark.parentNode) spark.parentNode.removeChild(spark); }, 700);
+              });
+            }
+
+          } else if (!hwDone) {
+            // ── Awakened, not yet confirmed: show kill grid ───────────
+            var alivePidsForHW = Object.keys(g.alive||{}).filter(function(id) { return g.alive[id] && id !== myId; });
+            var targetGrid = alivePidsForHW.map(function(pid) {
+              var p = players[pid] || {};
+              var isSel = hwShot === pid;
+              return '<div class="vote-chip ' + (isSel ? 'selected' : '') + '" onclick="wwEngine.sendAction({type:WW_ACTION.HIDDENWOLF_SHOOT,targetId:\'' + pid + '\'})">' +
+                '<div class="vote-avatar" style="background:' + Utils.avatarColor(p.name||pid) + '">' + (p.name||'?')[0] + '</div>' +
+                '<span>' + Utils.escapeHtml(p.name||pid) + '</span>' +
+                (isSel ? '<span class="vote-tally">✓</span>' : '') +
+              '</div>';
+            }).join('');
+            hwPanel.innerHTML =
+              '<div class="night-header" style="padding-bottom:4px">' +
+                '<div class="night-moon hw-awakened-icon">🐺</div>' +
+                '<h2 class="hw-awakened-title">孤狼覺醒！開刀權已啟動</h2>' +
+                '<p class="night-hint">所有狼隊友已出局，你是最後的希望。獨自選擇今晚的目標。</p>' +
+              '</div>' +
+              '<div class="hw-awakened-banner">🌕 你是最後的希望，開刀權已覺醒！</div>' +
+              '<div class="hw-teammate-section"><div class="hw-section-label">🐺 狼隊友狀態</div>' + teammateHtml + '</div>' +
+              '<div class="hw-kill-section"><div class="hw-section-label">🎯 選擇今晚目標</div>' +
+              '<div class="player-vote-grid">' + targetGrid + '</div></div>' +
+              '<div class="night-footer">' +
+                '<button class="btn btn-danger" ' + (hwShot ? '' : 'disabled') + ' onclick="wwEngine.sendAction({type:WW_ACTION.HIDDENWOLF_CONFIRM})">🥷 確認刀人</button>' +
+                '<button class="btn btn-ghost" onclick="wwEngine.sendAction({type:WW_ACTION.HIDDENWOLF_PASS})">🤝 今晚放棄行動</button>' +
+              '</div>';
+
+          } else {
+            // ── Awakened and confirmed: waiting ───────────────────────
+            hwPanel.innerHTML =
+              '<div class="night-header">' +
+                '<div class="night-moon hw-awakened-icon">🐺</div>' +
+                '<h2 class="hw-awakened-title">已選擇目標，等待天亮</h2>' +
+                '<p class="night-hint">你的刀已出手，靜靜等待結果…</p>' +
+              '</div>' +
+              '<div class="hw-teammate-section"><div class="hw-section-label">🐺 狼隊友狀態</div>' + teammateHtml + '</div>' +
+              '<div style="text-align:center;padding:16px;color:var(--teal);font-size:1rem">✓ 已確認行動</div>';
+          }
+        }
       }
     }
 
@@ -5175,10 +5396,16 @@ class UIController {
 
     // ── Witch panel ───────────────────────────────────────
     if (amWitch && !amDone) {
+      // Effective kill target: normal wolf kill OR hiddenwolf awakened kill.
+      // Hiddenwolf identity is hidden — witch sees the victim but not who killed them.
+      // hw target is only revealed to witch AFTER hw confirms (hiddenwolfDone=true),
+      // so hw's selection doesn't prematurely expose the kill before confirmation.
+      var effectiveKillTarget = g.wolfTarget ||
+        (g.hiddenwolfAwakened && g.hiddenwolfDone && g.hiddenwolfShot ? g.hiddenwolfShot : null);
       var killedEl = document.getElementById('ww-witch-killed');
       if (killedEl) {
-        if (g.wolfTarget) {
-          var targetName = (players[g.wolfTarget] || {}).name || '???';
+        if (effectiveKillTarget) {
+          var targetName = (players[effectiveKillTarget] || {}).name || '???';
           var targetColor = Utils.avatarColor(targetName);
           killedEl.innerHTML =
             '<div class="witch-kill-label">今晚被狼人選中的是：</div>' +
@@ -5193,17 +5420,17 @@ class UIController {
       }
       var saveBtn = document.getElementById('btn-witch-save');
       if (saveBtn) {
-        var canSave = !g.witchAntidoteUsed && !!g.wolfTarget;
+        var canSave = !g.witchAntidoteUsed && !!effectiveKillTarget;
         saveBtn.disabled    = !canSave;
         saveBtn.textContent = g.witchSave
           ? '✓ 解藥已選（再按取消）'
-          : (g.witchAntidoteUsed ? '解藥已用完' : (g.wolfTarget ? '💊 使用解藥救人' : '💊 解藥（今夜無目標）'));
+          : (g.witchAntidoteUsed ? '解藥已用完' : (effectiveKillTarget ? '💊 使用解藥救人' : '💊 解藥（今夜無目標）'));
         saveBtn.classList.toggle('active-choice', !!g.witchSave);
       }
       var witchPassBtn = document.getElementById('btn-witch-pass');
       if (witchPassBtn) {
         var summary = [];
-        if (g.witchSave && g.wolfTarget) summary.push('救人');
+        if (g.witchSave && effectiveKillTarget) summary.push('救人');
         if (g.witchPoison) summary.push('毒 ' + ((players[g.witchPoison]||{}).name||'?'));
         witchPassBtn.textContent = summary.length ? '確認（' + summary.join('，') + '），天亮 ✓' : '不使用藥水，天亮';
       }
@@ -5637,6 +5864,7 @@ class UIController {
       var isCupidThird = thirdPids.includes(pid);
       var loverBadge = isLover ? '<span class="rr-lover-badge">💕 情侶</span>' : '';
       var thirdBadge = isCupidThird && roleId === 'cupid' ? '<span class="rr-lover-badge">💘 邱比特</span>' : '';
+      var hwBadge    = roleId === 'hiddenwolf' ? '<span class="rr-lover-badge rr-hw-badge">🥷 金水偽裝</span>' : '';
       // For display: if third-party, show effective team
       var effectiveTeamClass = thirdPids.includes(pid) ? 'third' : role.team;
       return '<div class="rr-row ' + (isDead?'rr-dead-row':'') + ' team-' + effectiveTeamClass + '">' +
@@ -5645,7 +5873,7 @@ class UIController {
           (isDead ? '<div class="rr-skull">💀</div>' : '') +
         '</div>' +
         '<div class="rr-info">' +
-          '<div class="rr-name">' + Utils.escapeHtml(p.name||pid) + loverBadge + thirdBadge + '</div>' +
+          '<div class="rr-name">' + Utils.escapeHtml(p.name||pid) + loverBadge + thirdBadge + hwBadge + '</div>' +
           (isDead && cause ? '<div class="rr-cause">' + Utils.escapeHtml(cause) + '</div>' : '') +
         '</div>' +
         '<div class="rr-role-badge team-badge-' + effectiveTeamClass + '">' + role.icon + ' ' + role.name + '</div>' +

@@ -191,6 +191,8 @@
             <div class="role-config-grid">
               <div class="role-row wolf-role"><span class="rc-icon">🐺</span><span class="rc-name">狼人</span>
                 <div class="rc-counter"><button class="role-counter-btn" data-role="wolf" data-dir="-1">−</button><span id="ww-count-wolf" class="rc-num">2</span><button class="role-counter-btn" data-role="wolf" data-dir="1">+</button></div></div>
+              <div class="role-row wolf-role"><span class="rc-icon">🥷</span><span class="rc-name">隱狼</span>
+                <div class="rc-counter"><button class="role-counter-btn" data-role="hiddenwolf" data-dir="-1">−</button><span id="ww-count-hiddenwolf" class="rc-num">0</span><button class="role-counter-btn" data-role="hiddenwolf" data-dir="1">+</button></div></div>
               <div class="role-row wolf-role"><span class="rc-icon">👑</span><span class="rc-name">狼王</span>
                 <div class="rc-counter"><button class="role-counter-btn" data-role="wolfking" data-dir="-1">−</button><span id="ww-count-wolfking" class="rc-num">0</span><button class="role-counter-btn" data-role="wolfking" data-dir="1">+</button></div></div>
               <div class="role-row"><span class="rc-icon">🔮</span><span class="rc-name">預言家</span>
@@ -566,6 +568,10 @@
           <button id="btn-gravedigger-done" class="btn btn-ghost">✓ 已閱覽記錄，確認等待</button>
         </div>
       </div>
+      <!-- HiddenWolf night panel — fully rebuilt by JS -->
+      <div id="ww-night-hiddenwolf" class="night-subpanel hidden"></div>
+
+
       <div class="night-panel-footer">
         <div id="ww-night-progress" class="night-progress-text">等待夜晚行動…</div>
       </div>

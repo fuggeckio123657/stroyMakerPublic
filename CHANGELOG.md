@@ -888,28 +888,119 @@ V3.3.0 插入預言家 Modal 程式碼時，誤將原本 `if (amSeer && !amDone)
 
 進入「修改句子」階段時，輸入框自動填入玩家收到的原始句子，讓玩家直接在原句基礎上修改，而非面對空白框。仍使用 `data-round` key 確保每回合只預填一次，不會干擾已提交或正在編輯的內容。
 
----
-
 ## V 3.5.3 — 私訊紅點通知系統全面重構
 > 2026-04-10
 
 **問題一：未開啟聊天視窗時收到私訊，點開後 🤫 私訊 tab 沒有紅點**
 
-根本原因（雙重）：
-1. 架構上，私訊通知完全依賴「對話 watcher（watchDM）」。若玩家沒有開過某人的對話，根本沒有 Firebase 監聽器在運作，對方傳訊息時沒有任何機制能觸發紅點。
-2. 即使透過現有 `_appendDMMsg` 計入了未讀，`openBtn` 點擊時會**無條件**執行 `dmDot.classList.add('hidden')`，直接把 dm-tab-dot 隱藏掉，不管當前是否有未讀。
+雙重根本原因：
+1. 私訊通知完全依賴「對話 watcher（watchDM）」。若玩家沒有開過某人的對話，根本沒有 Firebase 監聽器，對方傳訊息時沒有任何機制觸發紅點。
+2. 即使已計入未讀，`openBtn` 點擊時會無條件執行 `dmDot.classList.add('hidden')`，直接把 dm-tab-dot 隱藏掉。
 
 修法：
-- **新增 `dm_inbox` 通知路徑**（`/rooms/<code>/dm_inbox/<toId>/<fromId>`）：進入房間時先清除舊通知再開始監聽（`initDMInbox`），傳送私訊時同步寫入對方 inbox（`writeDMInbox`），進入對話時清除該聯絡人的 inbox（`clearDMInbox`）。無論玩家在哪個畫面、有沒有 watcher，收到私訊都能觸發紅點。
-- **修正 `openBtn` 點擊邏輯**：移除無條件隱藏 `dm-tab-dot` 的行為。改為呼叫 `_updateDMDots()` 根據實際未讀狀態重新渲染，dm-tab-dot 只在真正沒有未讀時才消失。
+- 新增 `dm_inbox` 通知路徑（`/rooms/<code>/dm_inbox/<toId>/<fromId>`）：進入房間時先清除舊通知再監聽（`initDMInbox`），傳送私訊同步寫入對方 inbox（`writeDMInbox`），開啟對話時清除（`clearDMInbox`）。無論玩家在哪個畫面，收到私訊都能觸發紅點。
+- 修正 `openBtn` 點擊：移除無條件隱藏 `dm-tab-dot`，改呼叫 `_updateDMDots()` 根據實際狀態渲染。
 
-**問題二：關閉聊天視窗時停留在對話中（未按 ← 返回），重開後看不到新訊息**
+**問題二：關閉視窗時停留在對話中，重開後看不到新訊息**
 
-根本原因：`_openDMWith` 有「相同目標短路」邏輯——若 watcher 仍在監聽同一對象，直接 scrollTop 不重載。但這段期間 `_appendDMMsg` 只在 `convoVisible`（面板開著）時才渲染訊息到 DOM，面板關閉後到達的新訊息只計未讀不寫 DOM。重開時觸發短路，舊 DOM 不含新訊息。
+根本原因：`_openDMWith` 有短路邏輯——若 watcher 仍在監聽同一對象直接 scrollTop。但 `_appendDMMsg` 只在面板開啟時才渲染到 DOM，面板關閉後訊息只進未讀堆不寫 DOM，重開時短路讓舊 DOM 呈現。
 
-修法：移除短路邏輯。每次進入對話一律停止舊 watcher、清空 DOM、重建 Firebase 監聽。`limitToLast(80)` 自然 replay 所有歷史訊息（含面板關閉期間到達的），重開即可看到完整對話。
+修法：移除短路邏輯，每次進入對話一律停止舊 watcher、清空 DOM、重建 Firebase 監聽。`limitToLast(80)` 自然 replay 所有歷史。
 
-**附帶改善：**
-- `_closeDMConvo`（← 換人）現在停止 watcher，picker 模式改由 `dm_inbox` 接手通知
-- 切換到私訊 tab / 開啟對話時，自動清除對應聯絡人的 `dm_inbox` 記錄與未讀計數
-- `_switchChatTab` 切換到 DM tab 後呼叫 `_updateDMDots()` 重新計算紅點，而非無條件隱藏
+**附帶改善：** `_closeDMConvo` 停止 watcher；切換 DM tab 呼叫 `_updateDMDots()` 而非無條件隱藏。
+
+---
+
+## V 3.6.0 — 新職業：隱狼 🌫️
+> 2026-04-11
+
+加入第 11 個職業「隱狼」，引入金水偽裝與孤狼覺醒機制。
+
+**隱狼規則：**
+
+| 規則 | 說明 |
+|------|------|
+| 所屬陣營 | 狼人陣營（與狼人共進退） |
+| 預言家查驗 | 顯示「好人」（金水被動，天生偽裝） |
+| 夜間投票 | 不參與狼人刀人投票，不入狼窩 |
+| 隊友可見度 | 隱狼知道所有狼隊友；狼隊友不知道誰是隱狼 |
+| 初始狀態 | 無開刀權，不參與夜間殺人環節 |
+| 覺醒條件 | 場上所有普通狼／狼王全部出局後，下一夜覺醒 |
+| 覺醒後 | 每晚可獨自決定刀一名玩家（孤狼模式） |
+| 騎士決鬥 | 被騎士挑戰視為狼人，出局（hit） |
+| 守墓人認定 | 被投票出局後，守墓人看到「狼人陣營」 |
+| 遊戲繼續 | 隱狼存活時即便其他狼全出局，遊戲不結束 |
+
+**技術實作：**
+- `ROLES.hiddenwolf`：team:'wolf'，但 `_seerCheck` 中因 roleId ≠ 'wolf'/'wolfking'，自然返回 'good'（金水效果）
+- `_startNight`：每夜計算覺醒（`aliveNormalWolves.length === 0`），未覺醒時自動 pre-confirm 跳過行動阻擋
+- `_hiddenwolfShoot / Pass / Confirm`：覺醒後三個行動，刀人結果顯示「被狼人獵殺」（隱藏 hw 身份）
+- `_checkWin` / `isWolf`：包含 hiddenwolf，hw 存活時不觸發村民勝利
+- `_knightChallenge`：hiddenwolf 被視為 wolf（命中）
+- `_cupidConfirm`：hiddenwolf 被視為 wolf（影響情侶陣營判定）
+- 結局畫面：隱狼顯示「🌫️ 金水偽裝」標籤
+
+**夜晚面板：**
+- 未覺醒：狼隊友狀態列表（存活/死亡標示）+ 月亮互動玩具 + 等待提示
+- 覺醒後：震撼覺醒橫幅（紫色光暈動畫）+ 選人刀格 + 確認刀人／放棄按鈕
+
+## V 3.6.1 — 隱狼五項修復 + 私訊重開訊息消失修復
+> 2026-04-11
+
+**1. 隱狼選人 onclick 引號 Bug**
+根本原因：`targetId:'' + pid + ''` 中單引號與 HTML 屬性的單引號衝突，導致 `onclick` 字串解析失敗。修法：改為 `targetId:\'' + pid + `\'`，加兩層跳脫確保正確傳值。
+
+**2. 隱狼未覺醒時不應進入「確認等待」頁面**
+根本原因：`_show('ww-night-hiddenwolf', amHiddenWolf && !amDone)` 在隱狼 pre-confirm（`nightConfirmed[hwPid] = true`）後 `amDone` 變成 true，面板隱藏，玩家被推入 waiting 場景。
+修法：
+- 改為 `_show('ww-night-hiddenwolf', amHiddenWolf)`，永遠顯示隱狼專屬面板（類似守墓人）
+- `ww-night-waiting` 條件加入 `!(amHiddenWolf && !g.hiddenwolfAwakened)` 排除，未覺醒時不顯示等待畫面
+
+**3. 女巫看不到隱狼刀人目標**
+根本原因：女巫 UI 完全依賴 `g.wolfTarget`，但隱狼覺醒後的刀人存放在 `g.hiddenwolfShot`，女巫畫面永遠顯示「等待狼人確認目標中」。
+修法：新增 `effectiveKillTarget = g.wolfTarget || (g.hiddenwolfAwakened && g.hiddenwolfShot ? g.hiddenwolfShot : null)`，女巫看到的是受害者本人（不知道是誰刀的），保持身份隱匿。同時 `witchSave` 現在也能阻擋隱狼刀人（`_resolveNight` 加入 `&& !g.witchSave` 條件）。
+
+**4. 隱狼在設定面板位置移至狼人與狼王之間**
+調整 `index.html` 角色計數器順序：狼人 → 隱狼 → 狼王 → 其他職業。
+
+**5. 私訊：直接關閉聊天視窗（未按 ← 換人），重開後訊息不顯示**
+根本原因：關閉按鈕（✕）只設 `_chatOpen = false`，watcher 仍在背景運作。新訊息抵達時 `_appendDMMsg` 判斷 `convoVisible = false`（面板關閉），訊息不寫入 DOM，只計未讀。重開時因 watcher 仍存在觸發「相同目標短路」，直接 scrollTop 而非重載，舊 DOM 缺少訊息。
+修法：
+- `closeBtn` 點擊時若在 DM 對話中，停止 watcher（保留 `_dmTarget` 記錄位置）
+- `openBtn` 重開時若 `_dmTarget !== null`，呼叫 `_openDMWith` 做完整 Firebase reload（`limitToLast(80)` 帶回所有訊息含關閉期間新訊息）
+
+---
+
+## V 3.6.2 — 隱狼三項修復 + 私訊紅點通知系統重建
+> 2026-04-12
+
+**Bug 1：隱狼未覺醒時面板是黑畫面**
+
+根本原因：渲染條件為 `if (amHiddenWolf && !amDone)`，但 `_startNight` 中隱狼被 pre-confirm（`nightConfirmed[hwPid] = true`），使 `amDone = true`，導致整個內容區不渲染 → 黑畫面。
+
+修法：條件改為 `if (amHiddenWolf)`，並在內部以三個分支處理所有狀態：
+- **未覺醒（amDone=true but not awakened）**：顯示狼隊友狀態列表 + 月亮互動玩具
+- **覺醒且未確認**：顯示震撼覺醒橫幅 + 選人刀格 + 確認/放棄按鈕
+- **覺醒且已確認**：顯示「✓ 已確認行動，等待天亮」
+
+**Bug 2：隱狼無法使用確認鍵讓女巫看到狼刀**
+
+根本原因：`effectiveKillTarget` 使用 `g.hiddenwolfShot`（選擇目標時就設定），導致女巫在 hw 按下晶片的瞬間就看到受害者，且確認按鈕因 `disabled` 邏輯問題無法正常使用。
+
+修法：`effectiveKillTarget` 改為 `g.hiddenwolfDone && g.hiddenwolfShot`，只有 hw 按下「確認刀人」後，女巫才能看到被刀目標（身份仍隱匿）。
+
+**Bug 3：私訊紅點通知系統（全面重建）**
+
+問題：收到私訊時不顯示紅點；直接關閉聊天視窗後重開無法顯示通知。
+
+根本原因（雙重）：
+1. 現有程式碼完全沒有「對話外通知」機制——私訊通知完全依賴 `watchDM`，若沒有開過某人的對話就沒有 watcher，訊息到達時無任何機制觸發紅點。
+2. 直接關閉視窗（不按 ← 換人）時 `_dmTarget` 保留，`_activeTab` 仍為 `'dm'`，reopening 時重進同一對話，新訊息若在關閉期間到達因 `convoVisible=false` 而不寫 DOM，同時 `_dmUnreadMap` 也不計數。
+
+修法（三層）：
+- **新增 `dm_inbox` 通知路徑**（Firebase `/dm_inbox/<toId>/<fromId>`）：傳送時寫入（`writeDMInbox`），進入對話時清除（`clearDMInbox`），進房間後以 `startAt(joinTs)` 啟動監聽（`watchDMInbox`），避免歷史殘留通知。
+- **`closeBtn` 關閉時立即導正**：切換 `_activeTab='public'`、停止 DM watcher、重置 `_dmTarget=null`、UI 切回公開聊天、呼叫 `_updateDMDots()` 更新紅點。重開面板時自然落在公開聊天，DM 紅點正確顯示。
+- **`openBtn` 修正**：移除無條件清除 `dm-tab-dot` 的行為，改由 `_updateDMDots()` 根據實際未讀狀態決定。
+
+---
+
