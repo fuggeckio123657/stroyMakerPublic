@@ -315,6 +315,7 @@ const store = new Store({
     turnTime   : CONFIG.DEFAULT_TURN_TIME,
     maxPlayers : 12,
     wwConfig   : { roles: { wolf:2, wolfking:0, seer:1, witch:1, hunter:1, knight:0, bomber:0, cupid:0, hiddenwolf:0 }, nightTime: 30, voteTime: 60 },
+    madlibConfig: { answerTime: 45 },
   },
   game       : makeGame(),
 });
@@ -641,9 +642,11 @@ class RoomManager {
     // Detect mid-game join → spectator
     const gameSnap    = await transport.ref('rooms/' + roomCode + '/game').get();
     const gd          = gameSnap.val();
-    const wwStarted   = gd && gd.gameType === 'werewolf' && gd.wwPhase && gd.wwPhase !== 'role_reveal';
-    const storyStarted = gd && gd.phase && gd.phase !== PHASE.WAITING;
-    const isSpectator = !!(wwStarted || storyStarted);
+    const wwStarted     = gd && gd.gameType === 'werewolf' && gd.wwPhase && gd.wwPhase !== 'role_reveal';
+    const storyStarted  = gd && gd.phase && gd.phase !== PHASE.WAITING;
+    const chaosStarted  = gd && gd.gameType === 'chaos'  && gd.chaosPhase && gd.chaosPhase !== 'write_sentence';
+    const madlibStarted = gd && gd.gameType === 'madlib' && !!gd.mlPhase;
+    const isSpectator = !!(wwStarted || storyStarted || chaosStarted || madlibStarted);
 
     const myId = Utils.genId();
     store.set({ myId, myName: playerName, roomCode, isHost: false, hostId, isSpectator });
@@ -2293,6 +2296,577 @@ const wwEngine    = new WerewolfEngine();
 const chaosEngine = new ChaosEngine();
 
 // ═══════════════════════════════════════════════════════════════════════
+// STORY COLLAPSE 故事崩壞中 — Templates & Engine
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Embedded Story Templates ──────────────────────────────────────────
+// Each template: { id, title, desc, story (with {N} placeholders), prompts[] }
+// To add templates: append to ML_TEMPLATES, or call MadlibTemplates.loadFromJSON(url).
+
+const ML_TEMPLATES = [
+  {
+    id    : 'fantasy_001',
+    title : '⚔️ 勇者的末日冒險',
+    desc  : '一段充滿意外的奇幻英雄冒險故事',
+    story : '在【{0}】王國的最邊疆，住著一位名叫【{1}】的【{2}】。某天，一隻巨大的【{3}】突然從天而降，口中噴出大量的【{4}】，將整座【{5}】夷為平地。村民們驚慌失措地大喊：「{6}！」只有{1}臨危不亂，緊緊握住手中的【{7}】，深吸一口氣，高喊：「{8}！」然後以【{9}】的速度衝了上去。激戰了整整【{10}】個小時後，{1}使出了最終絕技——【{11}】，怪物應聲倒地。從此，{1}的名字傳遍了整個王國，成為永恆的傳說。',
+    prompts: [
+      '一個王國名稱',
+      '一個人名',
+      '一種職業',
+      '一種怪物或動物',
+      '一種液體',
+      '一種建築物或場所',
+      '一句驚呼或求救聲（例如：救命啊！）',
+      '一種武器或道具',
+      '一句豪言壯語',
+      '一個形容速度的詞（例如：閃電般）',
+      '一個數字',
+      '一個武術或技能招式名',
+    ],
+  },
+  {
+    id    : 'office_001',
+    title : '💼 史上最慘的上班日',
+    desc  : '一個職場小員工的終極悲慘遭遇',
+    story : '【{0}】今天上班遲到了，因為路上突然出現一群【{1}】，把整條【{2}】堵得水洩不通。好不容易到了公司，主管【{3}】立刻衝出來大吼：「{4}！」{0}只好解釋：「對不起，我昨晚在家【{5}】太久了。」同事小李偷偷遞來一張紙條，上面寫著：「{6}。」下午簡報時，{0}的投影片突然全變成了【{7}】的圖案，全場陷入詭異的沉默。散會後，{0}一個人坐在茶水間，默默拿出【{8}】，開始【{9}】，心裡只有一個念頭：今天真是太【{10}】了。',
+    prompts: [
+      '一個人名',
+      '一種動物（複數）',
+      '一條路或地名',
+      '一個主管或人名',
+      '一句憤怒的斥責',
+      '一個動詞活動（做什麼）',
+      '一句奇怪或莫名其妙的建議',
+      '一種生物或物品',
+      '一種食物或飲料',
+      '一個動詞活動（做什麼）',
+      '一個負面形容詞',
+    ],
+  },
+  {
+    id    : 'space_001',
+    title : '🚀 迷航星際探索隊',
+    desc  : '人類首次接觸外星文明的震撼紀實',
+    story : '西元【{0}】年，人類史上最勇敢的星際探索隊，終於抵達了傳說中的【{1}】星球。隊長【{2}】第一個踏出艙門，雙腳踩在【{3}】的地面上，情不自禁地大喊：「{4}！」突然，從遠處衝來一種叫做【{5}】的外星生物，它有【{6}】條腿，全身散發著【{7}】的氣味，看起來十分【{8}】。副隊長急忙拿出【{9}】，試圖【{10}】牠。就在千鈞一髮之際，外星生物張嘴，用流利的【{11}】語說：「{12}。」全體隊員目瞪口呆，人類的宇宙探索就此進入了全新紀元。',
+    prompts: [
+      '一個年份（數字）',
+      '一個星球或地名',
+      '一個人名',
+      '一個形容地面質感的詞',
+      '一句感嘆或驚呼聲',
+      '一個自創外星生物名稱',
+      '一個數字',
+      '一種氣味的描述',
+      '一個形容外表的詞',
+      '一種道具或武器',
+      '一個動詞（對動物做什麼）',
+      '一種語言名稱（如：台語、火星語）',
+      '一句外星語或奇怪的話',
+    ],
+  },
+  {
+  id    : 'story_001',
+  title : '🙂 看似普通的一天',
+  desc  : '一切都很正常，直到某些細節開始崩壞',
+  story : '【{0}】今天原本打算去【{1}】，途中卻遇到一群【{2}】，讓整個行程被迫延後。抵達後，{0}發現【{3}】竟然變成了【{4}】，讓人不寒而慄。此時一位自稱【{5}】的人走過來，低聲說：「{6}。」{0}半信半疑，只好照做，結果引發了【{7}】。現場突然出現【{8}】，並開始【{9}】，所有人都愣住了。最後，{0}只能拿出【{10}】，試圖【{11}】，卻讓事情變得更加【{12}】。',
+  prompts: [
+      '一個人名',
+      '一個地點',
+      '一種動物（複數）',
+      '一個物品',
+      '另一種物品',
+      '一種職業',
+      '一句奇怪的話',
+      '一個事件',
+      '一種東西（複數）',
+      '一個動作',
+      '一個物品',
+      '一個動作',
+      '一個形容詞',
+    ],
+  },
+  {
+  id    : 'story_002',
+  title : '📦 神秘任務',
+  desc  : '你只是接了一個任務，但事情不太對勁',
+  story : '{0}接到來自【{1}】的委託，要前往【{2}】取得【{3}】。途中遇見【{4}】，對方警告：「{5}。」但{0}沒有理會，繼續前進。到達目的地後，發現【{6}】竟然被【{7}】包圍。情急之下，{0}使用【{8}】，成功觸發【{9}】。然而下一秒，整個場景變成【{10}】，讓人無法理解。最後，{0}只好決定【{11}】，希望一切不要太【{12}】。',
+  prompts: [
+      '一個人名',
+      '一個組織或人名',
+      '一個地點',
+      '一個物品',
+      '一個角色或生物',
+      '一句警告',
+      '一個物品',
+      '一種生物（複數）',
+      '一個物品',
+      '一個事件',
+      '一種場景',
+      '一個行動',
+      '一個形容詞',
+    ],
+  },
+  {
+  id    : 'story_003',
+  title : '🫠 尷尬爆表的場合',
+  desc  : '你只想正常互動，但事情越來越奇怪',
+  story : '{0}今天被邀請參加【{1}】，一開始氣氛還算【{2}】。沒想到主持人突然點名：「{3}，來分享一下你的【{4}】！」{0}一時語塞，只能胡亂說：「{5}。」全場瞬間安靜。接著有人端出【{6}】，卻開始【{7}】，場面逐漸失控。旁邊的【{8}】悄悄說：「{9}。」但事情沒有好轉，反而出現【{10}】，讓整個場合變得更加【{11}】。最後，{0}只能假裝【{12}】，慢慢離開。',
+  prompts: [
+      '一個人名',
+      '一個場合',
+      '一個形容詞',
+      '一個人名',
+      '一個主題',
+      '一句奇怪發言',
+      '一種食物',
+      '一個動作',
+      '一種角色',
+      '一句建議',
+      '一個事件',
+      '一個形容詞',
+      '一個動作',
+    ],
+  },
+  {
+  id    : 'story_005',
+  title : '🧠 那段奇怪的回憶',
+  desc  : '你以為你記得，但其實…？',
+  story : '{0}一直記得那天在【{1}】發生的事。當時天空是【{2}】，而周圍充滿【{3}】。有人對{0}說：「{4}。」接著出現【{5}】，開始【{6}】。那一刻，{0}手中握著【{7}】，卻不知道該不該【{8}】。回想起來，整件事充滿【{9}】，尤其是最後出現的【{10}】，讓一切變得【{11}】。直到現在，{0}仍然無法理解那到底是【{12}】。',
+  prompts: [
+      '一個人名',
+      '一個地點',
+      '一種顏色或形容',
+      '一種東西（複數）',
+      '一句話',
+      '一個物體',
+      '一個動作',
+      '一個物品',
+      '一個動作',
+      '一個抽象名詞',
+      '一個東西',
+      '一個形容詞',
+      '一個名詞',
+    ],
+  },
+  {
+  id    : 'story_006',
+  title : '📈 情況逐漸升級',
+  desc  : '一開始只是小問題，最後卻完全失控',
+  story : '{0}原本只是想去【{1}】辦點事情，卻在路上看到【{2}】正在【{3}】。出於好奇，{0}停下來觀察，結果被【{4}】誤認為【{5}】。對方立刻大喊：「{6}！」場面瞬間混亂。有人開始拿出【{7}】，有人則開始【{8}】。不久後，【{9}】也加入，並導致【{10}】發生。{0}試圖用【{11}】來解決問題，但卻意外觸發【{12}】。整個現場變成【{13}】，甚至連【{14}】都出現了。最後，{0}只能【{15}】，心想這一切實在太【{16}】了。',
+  prompts: [
+      '一個人名',
+      '一個地點',
+      '一種東西（複數）',
+      '一個動作',
+      '一個角色',
+      '一個身分',
+      '一句大喊的話',
+      '一個物品',
+      '一個動作',
+      '一個東西或角色',
+      '一個事件',
+      '一個物品',
+      '一個事件',
+      '一種場景',
+      '一種東西（複數）',
+      '一個行動',
+      '一個形容詞',
+    ],
+  },
+  {
+  id: 'mystery_002',
+  title: '🔍 沒人相信的都市傳說',
+  desc: '關於那個神祕事件，大家的說法都不一樣。',
+  story: '最近在【{2}】流傳著一個傳聞。據說只要你在深夜【{5}】的時候，手裡拿著【{7}】，大喊三聲：「{4}！」就會召喚出【{0}】。他會強迫你跟他一起【{9}】，直到你拿出【{8}】當作祭品。這聽起來很【{10}】，但【{3}】卻對此深信不疑。他甚至還在【{2}】裝設了【{1}】來捕捉證據。上週，他真的拍到了【{0}】正在【{6}】的畫面，全網都震驚了。',
+  prompts: [
+    '一個生物',             // 0
+    '一種物品',             // 1
+    '一個地名',             // 2
+    '一個人名',             // 3
+    '一句短語/口號',         // 4
+    '一個時間點/動作',       // 5
+    '一個動詞',             // 6
+    '一個小東西',           // 7
+    '一種消耗品',           // 8
+    '一個動詞活動',         // 9
+    '一個形容詞',           // 10
+    ],
+  },
+  {
+  id: 'chaos_003',
+  title: '🍳 驚心動魄的職人時刻',
+  desc: '這是一場關於專業、汗水與大災難的紀錄。',
+  story: '今天【{0}】決定挑戰一項高難度任務：製作【{1}】。他先準備了大量的【{7}】，並將其放入【{2}】中攪拌。接著，為了增加風味，他偷偷加了一點【{8}】。這時，助教【{3}】走過來，嚴肅地提醒：「千萬別忘記要【{9}】！」話才說完，機器突然發出【{10}】的聲音，噴出了一堆【{11}】。現場變得很【{12}】，【{0}】只好拿起【{4}】，大叫：「{5}！」試圖挽救局面，最後卻只得到了一碗像【{6}】的東西。',
+  prompts: [
+    '一個人名',            // 0
+    '一個名詞',         // 1
+    '一個容器/空間',     // 2
+    '一個職場稱呼',     // 3
+    '長條狀物品',       // 4
+    '一句大喊的話',     // 5
+    '一種名詞（複數）',  // 6
+    '一種材料',         // 7
+    '一種液體',         // 8
+    '一個動作',         // 9
+    '一個擬聲詞',       // 10
+    '一種東西',         // 11
+    '一個形容詞',       // 12
+    ],
+  },
+  {
+  id: 'world_004',
+  title: '🌌 歡迎來到新的世界',
+  desc: '在出發冒險前，請先閱讀這份說明。',
+  story: '歡迎來到【{2}】！在這裡，每個人出生時都會獲得一個【{1}】。我們的最高領袖是【{3}】，他最討厭有人【{9}】。如果你想在這裡生存，每天早上必須對著【{7}】【{5}】三分鐘。這裡的通用貨幣是【{8}】，雖然看起來很【{10}】，但非常好用。這裡唯一的禁忌是：絕對不能在【{6}】的時候使用【{4}】，否則你會變成一隻【{0}】。如果你準備好了，就跟我們一起【{11}】吧！',
+  prompts: [
+    '一種生物',         // 0
+    '一種工具/配件',     // 1
+    '一個地名/國家',     // 2
+    '一個人物職稱',     // 3
+    '一種手持物品',     // 4
+    '一個動作',         // 5
+    '一個場合/情境',     // 6
+    '一個自然物',       // 7
+    '一種小東西（複數）', // 8
+    '一個形容詞',       // 9
+    '另一個形容詞',     // 10
+    '一個動詞',         // 11
+    ],
+  },
+];
+
+// ── Template Loader Interface ─────────────────────────────────────────
+// Public API for all template access. _extra holds dynamically loaded templates.
+// Future: await MadlibTemplates.loadFromJSON('./stories.json');
+const MadlibTemplates = {
+  _extra : [],
+  getAll()    { return ML_TEMPLATES.concat(this._extra); },
+  getById(id) { return this.getAll().find(function(t) { return t.id === id; }) || null; },
+  getRandom() { var all = this.getAll(); return all[Math.floor(Math.random() * all.length)]; },
+  loadFromJSON: async function(url) {
+    try {
+      var res  = await fetch(url);
+      var data = await res.json();
+      if (Array.isArray(data)) { var self = this; data.forEach(function(t){ self._extra.push(t); }); }
+    } catch(e) { console.warn('[MadlibTemplates] Failed to load:', url, e); }
+  },
+};
+
+// ── Action Constants ──────────────────────────────────────────────────
+const MADLIB_ACTION = {
+  SUBMIT_ANSWER   : 'ml_submit_answer',
+  UNSUBMIT_ANSWER : 'ml_unsubmit_answer',
+  REVEAL_NEXT     : 'ml_reveal_next',
+  RETURN_LOBBY    : 'ml_return_lobby',
+};
+
+// ── Game State Factory ────────────────────────────────────────────────
+const makeMadlibGame = () => ({
+  gameType          : 'madlib',
+  mlPhase           : 'answering',         // answering | reveal | end
+  selectedTemplateId: null,
+  rounds            : [],   // [{type:'independent'|'shared', questionIdxs?, questionIdx?, assignments?:{pid:qIdx}}]
+  currentRound      : 0,
+  answers           : {},   // { roundIdx: { pid: text } }
+  submitted         : {},   // { roundIdx: { pid: true } }
+  selectedAnswers   : {},   // { qIdx: answer } — final chosen answers for story
+  revealStep        : 0,    // how many blanks revealed (0..Q)
+  answerTime        : 45,
+  timeLeft          : 45,
+  activePids        : [],   // snapshot of non-spectator pids at game start
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// LAYER 10d ─ Mad Lib Engine (故事崩壞中)
+// ═══════════════════════════════════════════════════════════════════════
+
+class MadlibEngine {
+  constructor() {
+    this._timer = null;
+    bus.on(EVT.ACTION_RECEIVED, ({ action }) => {
+      if (!store.get().isHost) return;
+      if ((store.get().game || {}).gameType !== 'madlib') return;
+      this._dispatch(action);
+    });
+  }
+
+  _dispatch(a) {
+    var t = a.type, pid = a.playerId;
+    if      (t === MADLIB_ACTION.SUBMIT_ANSWER)   this._submitAnswer(pid, a.text, a.roundIdx);
+    else if (t === MADLIB_ACTION.UNSUBMIT_ANSWER) this._unsubmitAnswer(pid);
+    else if (t === MADLIB_ACTION.REVEAL_NEXT)     this._revealNext();
+    else if (t === MADLIB_ACTION.RETURN_LOBBY)    this._returnLobby();
+  }
+
+  // ── Start game (called from room) ────────────────────
+  // Template is picked randomly and secretly — nobody sees the template beforehand.
+  startGame(cfg) {
+    const { players } = store.get();
+    const pids     = Object.keys(players).filter(id => !players[id].isSpectator);
+    const template = MadlibTemplates.getRandom();
+    const Q        = template.prompts.length;
+    const P        = pids.length;
+    const rounds   = this._computeRounds(Q, P, pids);
+    store.replaceGame(Object.assign(makeMadlibGame(), {
+      answerTime        : cfg.answerTime || 45,
+      timeLeft          : cfg.answerTime || 45,
+      activePids        : pids,
+      selectedTemplateId: template.id,
+      mlPhase           : 'answering',
+      rounds,
+      currentRound      : 0,
+      answers           : {},
+      submitted         : {},
+      selectedAnswers   : {},
+      revealStep        : 0,
+    }));
+    this.broadcast();
+    this._startTimer();
+  }
+
+  // Template selection methods removed (Fix 3 — pure random, nobody sees template beforehand)
+
+  // ── Round distribution algorithm ──────────────────────
+  // ── Round distribution algorithm ──────────────────────
+  // u = floor(Q/P) independent rounds, each covering P blanks (one per player)
+  // r = Q - u*P remaining blanks
+  // If u >= P/2: upgrade → floor(r/2) split rounds + (1 shared if r odd)
+  //   split round: players split in half; each half answers a different question; random pick per group
+  // Else: r shared rounds (all answer same question, random pick)
+  // Verified: Q=15, P=4 → u=3, r=3, u>=2 → 3 ind + 1 split + 1 shared = 5 rounds ✓
+  _computeRounds(Q, P, pids) {
+    if (P === 0) return [];
+    var u = Math.floor(Q / P);
+    var r = Q - u * P;
+    var useUpgrade = (u >= P / 2);  // trigger when u >= half of player count
+
+    // Decide sub-round types for the r remaining blanks
+    var subRounds = [];
+    if (useUpgrade && r > 0) {
+      var splitCount = Math.floor(r / 2);
+      for (var i = 0; i < splitCount; i++) subRounds.push('split');
+      if (r % 2 === 1) subRounds.push('shared');
+    } else {
+      for (var j = 0; j < r; j++) subRounds.push('shared');
+    }
+
+    // Build type list (u independent + sub-rounds) and shuffle
+    var types = [];
+    for (var k = 0; k < u; k++) types.push('independent');
+    subRounds.forEach(function(t) { types.push(t); });
+    types = Utils.shuffle(types);
+
+    // Assign question indices randomly
+    var allQIdxs = Utils.shuffle(Array.from({ length: Q }, function(_, k) { return k; }));
+    var qi = 0;
+
+    return types.map(function(type) {
+      if (type === 'independent') {
+        var questionIdxs = allQIdxs.slice(qi, qi + P);
+        qi += P;
+        var shuffledPids = Utils.shuffle(pids.slice());
+        var assignments = {};
+        shuffledPids.forEach(function(pid, idx) { assignments[pid] = questionIdxs[idx]; });
+        return { type: 'independent', questionIdxs: questionIdxs, assignments: assignments };
+      } else if (type === 'split') {
+        var qIdxA = allQIdxs[qi++];
+        var qIdxB = allQIdxs[qi++];
+        var shuffledAll = Utils.shuffle(pids.slice());
+        var halfLen = Math.floor(P / 2);
+        // group_a gets ceil(P/2) players (if P odd, larger group), group_b gets floor(P/2)
+        var groupA = shuffledAll.slice(0, Math.ceil(P / 2));
+        var groupB = shuffledAll.slice(Math.ceil(P / 2));
+        return { type: 'split', questionIdx_a: qIdxA, questionIdx_b: qIdxB, group_a: groupA, group_b: groupB };
+      } else {
+        var qIdx = allQIdxs[qi++];
+        return { type: 'shared', questionIdx: qIdx };
+      }
+    });
+  }
+
+  // ── Timer ─────────────────────────────────────────────
+  _startTimer() {
+    this.stopTimer();
+    var t = store.get().game.answerTime || 45;
+    this._timer = setInterval(() => {
+      t = Math.max(0, t - 1);
+      store.patchGame({ timeLeft: t });
+      this.broadcast();
+      // At t=0: clients have already sent their textarea content at t=1 (see _renderMadlib).
+      // By now those actions have arrived and been processed. Simply fill any remaining
+      // empties with '（時間到）' and advance to the next round — same pattern as ChaosEngine.
+      if (t <= 0) { this.stopTimer(); this._autoSubmitAll(); this._resolveCurrentRound(); }
+    }, 1000);
+  }
+
+  stopTimer() { clearInterval(this._timer); this._timer = null; }
+
+  // ── Answers ───────────────────────────────────────────
+  _autoSubmitAll() {
+    const g = store.get().game;
+    const cr  = g.currentRound;
+    const rounds2 = Array.isArray(g.rounds) ? g.rounds : Object.values(g.rounds || {});
+    const round = rounds2[cr] || {};
+    const activePidsNorm2 = Array.isArray(g.activePids) ? g.activePids : Object.values(g.activePids || {});
+    var pidsToSubmit = [];
+    if (round.type === 'split') {
+      var ga = Array.isArray(round.group_a) ? round.group_a : Object.values(round.group_a || {});
+      var gb = Array.isArray(round.group_b) ? round.group_b : Object.values(round.group_b || {});
+      pidsToSubmit = ga.concat(gb);
+    } else {
+      pidsToSubmit = activePidsNorm2;
+    }
+    var answers   = Utils.deepClone(g.answers);
+    var submitted = Utils.deepClone(g.submitted);
+    if (!answers[cr])   answers[cr]   = {};
+    if (!submitted[cr]) submitted[cr] = {};
+    pidsToSubmit.forEach(function(pid) {
+      if (!submitted[cr][pid]) {
+        answers[cr][pid]   = '（時間到）';
+        submitted[cr][pid] = true;
+      }
+    });
+    store.patchGame({ answers: answers, submitted: submitted });
+    this.broadcast();
+  }
+
+  _submitAnswer(pid, text, roundIdx) {
+    const g = store.get().game;
+    if (g.mlPhase !== 'answering') return;
+    const cr  = g.currentRound;
+    // Reject stale actions: if the action was stamped with a round index that no
+    // longer matches the current round, the action arrived late (Firebase delay > 400ms).
+    // Applying it would mark the player as submitted in the WRONG round.
+    if (roundIdx !== undefined && roundIdx !== cr) return;
+    var answers   = Utils.deepClone(g.answers);
+    var submitted = Utils.deepClone(g.submitted);
+    if (!answers[cr])   answers[cr]   = {};
+    if (!submitted[cr]) submitted[cr] = {};
+    answers[cr][pid]   = text || '（空白）';
+    submitted[cr][pid] = true;
+    store.patchGame({ answers: answers, submitted: submitted });
+    this.broadcast();
+    // All relevant players submitted → resolve immediately
+    var roundsNorm = Array.isArray(g.rounds) ? g.rounds : Object.values(g.rounds || {});
+    var round2 = roundsNorm[cr] || {};
+    var activePidsNorm = Array.isArray(g.activePids) ? g.activePids : Object.values(g.activePids || {});
+    var relevantPids = round2.type === 'split'
+      ? (Array.isArray(round2.group_a) ? round2.group_a : Object.values(round2.group_a || {}))
+          .concat(Array.isArray(round2.group_b) ? round2.group_b : Object.values(round2.group_b || {}))
+      : activePidsNorm;
+    // All players submitted before time is up → resolve early.
+    if (relevantPids.every(function(p) { return submitted[cr][p]; })) {
+      this.stopTimer();
+      this._resolveCurrentRound();
+    }
+  }
+
+  _unsubmitAnswer(pid) {
+    const g = store.get().game;
+    if (g.mlPhase !== 'answering') return;
+    const cr = g.currentRound;
+    var submitted = Utils.deepClone(g.submitted);
+    if (submitted[cr]) delete submitted[cr][pid];
+    store.patchGame({ submitted: submitted });
+    this.broadcast();
+  }
+
+  // ── Round resolution ──────────────────────────────────
+  _resolveCurrentRound() {
+    const g      = store.get().game;
+    if (g.mlPhase !== 'answering') return;
+    const cr     = g.currentRound;
+    var roundsArr2 = Array.isArray(g.rounds) ? g.rounds : Object.values(g.rounds || {});
+    const round  = roundsArr2[cr];
+    if (!round) return;
+    const roundAnswers   = (g.answers[cr]) || {};
+    var selectedAnswers  = Utils.deepClone(g.selectedAnswers);
+
+    if (round.type === 'independent') {
+      // Each player's answer fills their individually assigned blank
+      var asgn = round.assignments || {};
+      Object.keys(asgn).forEach(function(pid) {
+        var qIdx = asgn[pid];
+        selectedAnswers[qIdx] = roundAnswers[pid] || '（未填寫）';
+      });
+    } else if (round.type === 'split') {
+      // Two groups each answer a different blank; randomly pick one per group
+      var pickFrom = function(groupPids, qIdx) {
+        var gpArr = Array.isArray(groupPids) ? groupPids : Object.values(groupPids || {});
+        var cands = gpArr.filter(function(p) { return roundAnswers[p]; });
+        if (cands.length === 0) cands = gpArr;
+        var pick = cands[Math.floor(Math.random() * cands.length)];
+        selectedAnswers[qIdx] = (pick && roundAnswers[pick]) || '（未填寫）';
+      };
+      pickFrom(round.group_a, round.questionIdx_a);
+      pickFrom(round.group_b, round.questionIdx_b);
+    } else {
+      // Shared: all answer same blank; randomly pick one
+      var activePidsR = Array.isArray(g.activePids) ? g.activePids : Object.values(g.activePids || {});
+      var candidates = activePidsR.filter(function(p) { return roundAnswers[p]; });
+      if (candidates.length === 0) candidates = activePidsR.slice();
+      var chosen = candidates[Math.floor(Math.random() * candidates.length)];
+      selectedAnswers[round.questionIdx] = roundAnswers[chosen] || '（未填寫）';
+    }
+
+    const nextRound = cr + 1;
+    var roundsLen = Array.isArray(g.rounds) ? g.rounds.length : Object.keys(g.rounds || {}).length;
+    if (nextRound >= roundsLen) {
+      // All rounds done → enter reveal phase
+      store.patchGame({
+        selectedAnswers : selectedAnswers,
+        mlPhase         : 'reveal',
+        currentRound    : nextRound,
+        revealStep      : 0,
+      });
+      this.broadcast();
+    } else {
+      // Advance to next round
+      store.patchGame({
+        selectedAnswers : selectedAnswers,
+        currentRound    : nextRound,
+        timeLeft        : g.answerTime,
+      });
+      this.broadcast();
+      this._startTimer();
+    }
+  }
+
+  // ── Reveal ────────────────────────────────────────────
+  _revealNext() {
+    const g        = store.get().game;
+    if (g.mlPhase !== 'reveal') return;
+    const template = MadlibTemplates.getById(g.selectedTemplateId);
+    const Q        = template ? template.prompts.length : 0;
+    const newStep  = Math.min((g.revealStep || 0) + 1, Q);
+    store.patchGame({ revealStep: newStep, mlPhase: newStep >= Q ? 'end' : 'reveal' });
+    this.broadcast();
+  }
+
+  // ── Lobby ─────────────────────────────────────────────
+  _returnLobby() {
+    store.replaceGame(makeGame());
+    this.broadcast();
+    bus.emit(EVT.RETURN_LOBBY);
+  }
+
+  // ── Helpers ───────────────────────────────────────────
+  broadcast() {
+    const { isHost, game, roomCode } = store.get();
+    if (!isHost) return;
+    transport.pushGameState(roomCode, game);
+  }
+
+  sendAction(action) {
+    const { isHost, myId, roomCode } = store.get();
+    if (isHost) bus.emit(EVT.ACTION_RECEIVED, { action: Object.assign({}, action, { playerId: myId }) });
+    else transport.pushAction(roomCode, Object.assign({}, action, { playerId: myId }));
+  }
+}
+
+const madlibEngine = new MadlibEngine();
+
+// ═══════════════════════════════════════════════════════════════════════
 // LAYER 11 ─ UI Controller
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -2363,8 +2937,21 @@ class UIController {
         return;
       }
 
-      // WW / chaos game ended / returned to lobby
-      if (this._screen === 'ww-game' || this._screen === 'chaos-game') {
+      if (state.gameType === 'madlib') {
+        if (this._screen !== 'madlib') {
+          document.querySelectorAll('.screen').forEach(el => {
+            el.classList.add('hidden'); el.classList.remove('active');
+          });
+          const elM = document.getElementById('screen-madlib');
+          if (elM) { elM.classList.remove('hidden'); elM.classList.add('active'); }
+          this._screen = 'madlib';
+        }
+        this._renderMadlib(Object.assign({}, store.get(), { game: state }));
+        return;
+      }
+
+      // WW / chaos / madlib game ended / returned to lobby
+      if (this._screen === 'ww-game' || this._screen === 'chaos-game' || this._screen === 'madlib') {
         const { myId, roomCode, isSpectator: wasSpec } = store.get();
         if (wasSpec) {
           store.set({ isSpectator: false });
@@ -2389,6 +2976,7 @@ class UIController {
     this._bindGame();
     this._bindWWGame();
     this._bindChaosGame();
+    this._bindMadlibGame();
     this._bindUnifiedChat();
 
     // Kicked modal OK button
@@ -2471,6 +3059,12 @@ class UIController {
       if (!g || g.gameType !== 'chaos') return;
       if (s.isHost) this._renderChaos(s);
     }
+    if (this._screen === 'madlib') {
+      const g = s.game;
+      if (!g || g.gameType !== 'madlib') return;
+      // Both host and non-host render via _sync; data-card-key guard prevents textarea disruption
+      this._renderMadlib(s);
+    }
   }
 
   // ── Room rendering ────────────────────────────────────
@@ -2550,9 +3144,10 @@ class UIController {
         btn.classList.toggle('active', btn.dataset.type === gameType);
       });
 
-      this._show('story-settings', gameType === 'story');
-      this._show('ww-settings',    gameType === 'werewolf');
-      this._show('chaos-settings', gameType === 'chaos');
+      this._show('story-settings',  gameType === 'story');
+      this._show('ww-settings',     gameType === 'werewolf');
+      this._show('chaos-settings',  gameType === 'chaos');
+      this._show('madlib-settings', gameType === 'madlib');
 
       if (gameType === 'story') {
         document.querySelectorAll('input[name="game-mode"]').forEach(r => { r.checked = r.value === mode; });
@@ -2589,6 +3184,10 @@ class UIController {
       lines = '<div class="spec-lobby-row"><span>📖 故事接龍</span></div>' +
         '<div class="spec-lobby-row"><span class="slr-label">計時方式</span><span>' + (mode==='time'?'計時制':'回合制') + '</span></div>' +
         '<div class="spec-lobby-row"><span class="slr-label">回合數</span><span>' + rounds + ' 回合</span></div>';
+    } else if (gameType === 'madlib') {
+      var mc = settings.madlibConfig || {};
+      lines = '<div class="spec-lobby-row"><span>📝 故事崩壞中</span></div>' +
+        '<div class="spec-lobby-row"><span class="slr-label">填詞時限</span><span>' + (mc.answerTime||45) + ' 秒</span></div>';
     } else if (gameType === 'chaos') {
       var cc = settings.chaosConfig || {};
       lines = '<div class="spec-lobby-row"><span>🎲 規則混亂</span></div>' +
@@ -2621,6 +3220,11 @@ class UIController {
         '<div class="preview-row"><span class="preview-label">遊戲模式</span><span class="preview-val">📖 故事接龍</span></div>' +
         '<div class="preview-row"><span class="preview-label">計時方式</span><span class="preview-val">' + (mode==='time'?'計時制（'+turnTime+'秒/輪）':'回合制（全員鎖定換輪）') + '</span></div>' +
         '<div class="preview-row"><span class="preview-label">回合數</span><span class="preview-val">' + rounds + ' 回合</span></div>';
+    } else if (gameType === 'madlib') {
+      const mc = settings.madlibConfig || {};
+      cont.innerHTML =
+        '<div class="preview-row"><span class="preview-label">遊戲模式</span><span class="preview-val">📝 故事崩壞中</span></div>' +
+        '<div class="preview-row"><span class="preview-label">填詞時限</span><span class="preview-val">' + (mc.answerTime||45) + ' 秒／輪</span></div>';
     } else if (gameType === 'chaos') {
       const cc = settings.chaosConfig || {};
       cont.innerHTML =
@@ -3151,6 +3755,36 @@ class UIController {
     });
 
     // ── Chaos: start game ───────────────────────────────
+    // ── Madlib: push settings on change ──────────────────
+    function pushMadlib() {
+      var s = store.get().settings;
+      var mc = { answerTime: Utils.clamp(parseInt((document.getElementById('madlib-answer-time')||{}).value||45),15,120) };
+      var ns = Object.assign({}, s, { madlibConfig: mc });
+      store.set({ settings: ns });
+      transport.pushSettings(store.get().roomCode, ns);
+    }
+    var mATEl = document.getElementById('madlib-answer-time');
+    if (mATEl) mATEl.addEventListener('change', pushMadlib);
+
+    // ── Madlib: start game (template auto-selected randomly in engine) ─
+    this._on('btn-start-madlib', 'click', function() {
+      var players = store.get().players;
+      var activePlayers = Object.values(players).filter(function(p) { return !p.isSpectator; });
+      if (activePlayers.length < 2) return self._err('room-error', '故事崩壞中至少需要 2 名玩家');
+      var answerTime = Utils.clamp(parseInt((document.getElementById('madlib-answer-time')||{}).value||45),15,120);
+      var newSettings = Object.assign({}, store.get().settings, { madlibConfig: { answerTime: answerTime } });
+      store.set({ settings: newSettings });
+      transport.pushSettings(store.get().roomCode, newSettings);
+      madlibEngine.startGame({ answerTime: answerTime });
+      document.querySelectorAll('.screen').forEach(function(el) {
+        el.classList.add('hidden'); el.classList.remove('active');
+      });
+      var scrEl = document.getElementById('screen-madlib');
+      if (scrEl) { scrEl.classList.remove('hidden'); scrEl.classList.add('active'); }
+      self._screen = 'madlib';
+      self._renderMadlib(store.get());
+    });
+
     this._on('btn-start-chaos', 'click', function() {
       var players      = store.get().players;
       var activePlayers = Object.values(players).filter(function(p) { return !p.isSpectator; });
@@ -5887,6 +6521,269 @@ class UIController {
       '<div class="rr-section-label rr-dead-label">☠️ 出局玩家</div>' +
       (dead.length  ? dead.map(makeRow).join('')  : '<div class="rr-empty">（無）</div>');
   }
+
+
+  // ── Mad Lib Bindings ──────────────────────────────────
+
+  _bindMadlibGame() {
+    // btn-ml-reveal and btn-ml-back live in the static HTML — safe to bind once
+    this._on('btn-ml-reveal', 'click', function() { madlibEngine.sendAction({ type: MADLIB_ACTION.REVEAL_NEXT }); });
+    this._on('btn-ml-back',   'click', function() { madlibEngine.sendAction({ type: MADLIB_ACTION.RETURN_LOBBY }); });
+    // btn-ml-submit / btn-ml-unsubmit are dynamically built inside ml-question-area.
+    // They are bound directly in _renderMadlibAnswering via querySelector after innerHTML rebuild.
+    // No _on() needed — avoids "element not found" warnings.
+  }
+
+  // ── Mad Lib Rendering ──────────────────────────────────
+
+  _renderMadlib(s) {
+    var g = s.game, players = s.players, myId = s.myId, isHost = s.isHost, isSpectator = s.isSpectator;
+    if (!g || g.gameType !== 'madlib') return;
+    var phase = g.mlPhase;
+
+    // Header — only update text, never rebuild
+    var hdr = document.getElementById('ml-header-info');
+    if (hdr) {
+      var phaseLabel = { answering:'填詞中', reveal:'故事揭示', end:'崩壞完成！' };
+      var newHdr = '📝 故事崩壞中　' + (phaseLabel[phase] || '');
+      if (hdr.textContent !== newHdr) hdr.textContent = newHdr;
+    }
+    // Timer — only update value, never rebuild
+    var timerWrap = document.getElementById('ml-timer-wrap');
+    var timerVal  = document.getElementById('ml-timer-val');
+    var showTimer = phase === 'answering';
+    if (timerWrap) timerWrap.classList.toggle('hidden', !showTimer);
+    if (timerVal && showTimer) {
+      var newTime = String(g.timeLeft || 0);
+      if (timerVal.textContent !== newTime) timerVal.textContent = newTime;
+    }
+
+    // Auto-submit at t=1 — mirrors ChaosEngine's pattern.
+    // Fires one second before host resolves at t=0, giving the action time to arrive
+    // and be processed before _autoSubmitAll + _resolveCurrentRound run on the host.
+    // Always sends (even empty textarea) so the host gets a real submission rather
+    // than a '（時間到）' stamp — keeps the player's answer if they typed anything.
+    if (phase === 'answering' && g.timeLeft === 1 && !isSpectator) {
+      var cr0 = g.currentRound;
+      if (!((g.submitted || {})[cr0] || {})[myId]) {
+        var inp0 = document.getElementById('ml-answer-input');
+        var txt0 = inp0 ? inp0.value.trim() : '';
+        madlibEngine.sendAction({ type: MADLIB_ACTION.SUBMIT_ANSWER, text: txt0 || '（時間到）', roundIdx: cr0 });
+      }
+    }
+
+    // Show correct panel (only hide others when phase changes)
+    ['answering','reveal','end'].forEach(function(p) {
+      var el = document.getElementById('ml-panel-' + p);
+      if (el) el.classList.toggle('hidden', p !== phase);
+    });
+
+    // Spectator overlay
+    var specOv = document.getElementById('ml-spectator-overlay');
+    if (specOv) specOv.classList.toggle('hidden', !isSpectator);
+    if (isSpectator) { this._renderMadlibSpectator(g, players); return; }
+
+    if (phase === 'answering') this._renderMadlibAnswering(g, myId, players, isHost);
+    if (phase === 'reveal')    this._renderMadlibReveal(g, isHost);
+    if (phase === 'end')       this._renderMadlibEnd(g);
+  }
+
+  _renderMadlibAnswering(g, myId, players, isHost) {
+    var panel = document.getElementById('ml-panel-answering');
+    if (!panel) return;
+    var cr = g.currentRound;
+    // Firebase serializes arrays as objects ({0:v,1:v}) — normalize defensively
+    var roundsArr = Array.isArray(g.rounds) ? g.rounds : Object.values(g.rounds || {});
+    var round = roundsArr[cr];
+    if (!round) return;
+    // Also normalize group arrays inside split rounds (Firebase object→array)
+    if (round.type === 'split') {
+      if (round.group_a && !Array.isArray(round.group_a)) round = Object.assign({}, round, { group_a: Object.values(round.group_a) });
+      if (round.group_b && !Array.isArray(round.group_b)) round = Object.assign({}, round, { group_b: Object.values(round.group_b) });
+    }
+    if (round.type === 'independent' && round.assignments && typeof round.assignments === 'object') {
+      // assignments is {pid: qIdx} — already an object, no normalization needed
+    }
+    var template = MadlibTemplates.getById(g.selectedTemplateId);
+    if (!template) return;
+    var totalRounds = roundsArr.length;
+    var submitted   = !!((g.submitted || {})[cr] || {})[myId];
+
+    // Round info — only round number, no type label (Fix 2)
+    var roundInfo = document.getElementById('ml-round-info');
+    if (roundInfo) {
+      var newInfo = '第 ' + (cr+1) + ' / ' + totalRounds + ' 輪';
+      if (roundInfo.getAttribute('data-ri') !== newInfo) {
+        roundInfo.setAttribute('data-ri', newInfo);
+        roundInfo.innerHTML = '<span class="ml-round-badge">' + newInfo + '</span>';
+      }
+    }
+
+    // My question index — depends on round type
+    var myQIdx = null;
+    var inSplitA = false, inSplitB = false;
+    if (round.type === 'independent') {
+      myQIdx = (round.assignments || {})[myId];
+    } else if (round.type === 'split') {
+      // Determine which group this player is in
+      var grpA = Array.isArray(round.group_a) ? round.group_a : Object.values(round.group_a || {});
+      var grpB = Array.isArray(round.group_b) ? round.group_b : Object.values(round.group_b || {});
+      inSplitA = grpA.indexOf(myId) >= 0;
+      inSplitB = grpB.indexOf(myId) >= 0;
+      if (inSplitA) myQIdx = round.questionIdx_a;
+      else if (inSplitB) myQIdx = round.questionIdx_b;
+    } else {
+      myQIdx = round.questionIdx;
+    }
+    var myPrompt = (myQIdx !== undefined && myQIdx !== null) ? template.prompts[myQIdx] : null;
+
+    // Progress — normalize activePids (Firebase may serialize as object)
+    var activePidsNorm = Array.isArray(g.activePids) ? g.activePids : Object.values(g.activePids || {});
+    var relevantPids = round.type === 'split'
+      ? (Array.isArray(round.group_a) ? round.group_a : Object.values(round.group_a || {}))
+          .concat(Array.isArray(round.group_b) ? round.group_b : Object.values(round.group_b || {}))
+      : activePidsNorm;
+    var submittedCount = relevantPids.filter(function(p) { return !!((g.submitted || {})[cr] || {})[p]; }).length;
+    var totalCount     = relevantPids.length;
+    var progEl = document.getElementById('ml-answer-progress');
+    if (progEl) {
+      var newProg = submittedCount + ' / ' + totalCount + ' 人已提交';
+      if (progEl.textContent !== newProg) progEl.textContent = newProg;
+    }
+
+    // Question card:
+    // - submitted / no-q states: always rebuild (no textarea to protect, stale HTML must be cleared)
+    // - textarea state (!submitted): guard with data-card-key to avoid destroying content mid-typing
+    var qArea = document.getElementById('ml-question-area');
+    if (!qArea) return;
+
+    if (myPrompt === null || myPrompt === undefined) {
+      // Not assigned a question this round
+      qArea.removeAttribute('data-card-key');
+      qArea.innerHTML = '<div class="ml-no-q">🎲 這輪靜靜等待…</div>';
+
+    } else if (submitted) {
+      // Always rebuild the locked view — no textarea to protect, and stale locked HTML
+      // must be replaced when the round advances (even if cr changes, old HTML stays until rebuilt).
+      qArea.removeAttribute('data-card-key');
+      var myAns = ((g.answers || {})[cr] || {})[myId] || '';
+      qArea.innerHTML =
+        '<div class="ml-submitted-card">' +
+          '<div class="ml-q-label">✍ 你的答案</div>' +
+          '<div class="ml-answer-display">' + Utils.escapeHtml(myAns) + '</div>' +
+          '<button class="btn btn-ghost ml-unsubmit-btn" style="margin-top:10px;width:100%">↩ 取消，重新填寫</button>' +
+        '</div>' +
+        '<div class="ml-waiting-dots">等待其他人…<div class="wl-dots"><span></span><span></span><span></span></div></div>';
+      var unBtn = qArea.querySelector('.ml-unsubmit-btn');
+      if (unBtn) unBtn.addEventListener('click', function() {
+        madlibEngine.sendAction({ type: MADLIB_ACTION.UNSUBMIT_ANSWER });
+      });
+
+    } else {
+      // Textarea state: only rebuild if round or question changed, to preserve mid-typing content.
+      var cardKey = cr + ':' + String(myQIdx);
+      if (qArea.getAttribute('data-card-key') === cardKey) return;
+      qArea.setAttribute('data-card-key', cardKey);
+      qArea.innerHTML =
+        '<div class="ml-question-card">' +
+          '<div class="ml-q-prompt">' + Utils.escapeHtml(myPrompt) + '</div>' +
+          '<textarea class="ml-answer-textarea chaos-textarea" id="ml-answer-input" placeholder="輸入你的答案…" maxlength="50" rows="2" autocomplete="off"></textarea>' +
+          '<button class="btn btn-primary btn-full ml-submit-btn" style="margin-top:10px">✦ 送出答案</button>' +
+        '</div>';
+      var subBtn = qArea.querySelector('.ml-submit-btn');
+      var inp    = qArea.querySelector('#ml-answer-input');
+      var doSubmit = function() {
+        var txt = inp ? inp.value.trim() : '';
+        if (!txt) return;
+        madlibEngine.sendAction({ type: MADLIB_ACTION.SUBMIT_ANSWER, text: txt, roundIdx: cr });
+      };
+      if (subBtn) subBtn.addEventListener('click', doSubmit);
+      if (inp)    { inp.focus(); inp.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSubmit(); }
+      }); }
+    }
+  }
+
+  _renderMadlibReveal(g, isHost) {
+    var panel = document.getElementById('ml-panel-reveal');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    var template = MadlibTemplates.getById(g.selectedTemplateId);
+    if (!template) return;
+    var Q    = template.prompts.length;
+    var step = g.revealStep || 0;
+
+    var titleEl = document.getElementById('ml-reveal-title');
+    if (titleEl) titleEl.textContent = template.title;
+    var progEl  = document.getElementById('ml-reveal-progress');
+    if (progEl)  progEl.textContent = '已揭示 ' + step + ' / ' + Q + ' 格';
+
+    var storyEl = document.getElementById('ml-story-display');
+    if (storyEl) storyEl.innerHTML = this._buildStoryHTML(template.story, g.selectedAnswers, step);
+
+    var revBtn  = document.getElementById('btn-ml-reveal');
+    var watchEl = document.getElementById('ml-reveal-watch');
+    if (revBtn)  revBtn.classList.toggle('hidden',  !isHost || step >= Q);
+    if (watchEl) watchEl.classList.toggle('hidden', isHost);
+  }
+
+  _renderMadlibEnd(g) {
+    var panel = document.getElementById('ml-panel-end');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    var template = MadlibTemplates.getById(g.selectedTemplateId);
+    if (!template) return;
+    var titleEl = document.getElementById('ml-end-title');
+    if (titleEl) titleEl.textContent = template.title;
+    var storyEl = document.getElementById('ml-end-story');
+    if (storyEl) {
+      var Q = template.prompts.length;
+      storyEl.innerHTML = this._buildStoryHTML(template.story, g.selectedAnswers, Q);
+    }
+  }
+
+  _renderMadlibSpectator(g, players) {
+    var cont = document.getElementById('ml-spectator-content');
+    if (!cont) return;
+    var phase = g.mlPhase;
+    var phaseNames = { answering:'填詞中', reveal:'故事揭示', end:'已完成' };
+    var html = '<div class="spec-phase-badge">' + (phaseNames[phase]||phase) + '</div>';
+    if (g.selectedTemplateId) {
+      var tpl = MadlibTemplates.getById(g.selectedTemplateId);
+      if (tpl) html += '<div class="spec-round-info">📖 ' + Utils.escapeHtml(tpl.title) + '</div>';
+    }
+    if (phase === 'answering') {
+      var cr = g.currentRound;
+      var total = (g.rounds || []).length;
+      var sub   = Object.keys(((g.submitted || {})[cr] || {})).length;
+      var act   = (g.activePids || []).length;
+      html += '<div class="spec-round-info">第 ' + (cr+1) + ' / ' + total + ' 輪　' + sub + ' / ' + act + ' 人已提交</div>';
+    }
+    cont.innerHTML = html;
+  }
+
+  // Parse story text and build HTML with revealed/hidden blanks
+  _buildStoryHTML(storyText, selectedAnswers, revealStep) {
+    var parts = storyText.split(/\{(\d+)\}/g);
+    var colors = ['#4ac0a0','#c9a84c','#9b85e8','#e07050','#60b0e8','#e8845e'];
+    var html = '';
+    for (var i = 0; i < parts.length; i++) {
+      if (i % 2 === 0) {
+        html += Utils.escapeHtml(parts[i]);
+      } else {
+        var qIdx   = parseInt(parts[i]);
+        var answer = selectedAnswers[qIdx];
+        if (answer !== undefined && qIdx < revealStep) {
+          var color = colors[qIdx % colors.length];
+          html += '<span class="ml-answer-filled" style="color:' + color + ';border-bottom-color:' + color + '">' + Utils.escapeHtml(answer) + '</span>';
+        } else {
+          html += '<span class="ml-blank-slot" data-idx="' + qIdx + '">　　　　</span>';
+        }
+      }
+    }
+    return html;
+  }
+
 
   // ── DOM helpers ───────────────────────────────────────
 

@@ -61,6 +61,13 @@
           <div class="hmp-desc">創意改句 · 投票評分</div>
         </div>
       </div>
+      <div class="home-mode-pill hmp-madlib">
+        <span class="hmp-icon">📝</span>
+        <div>
+          <div class="hmp-name">故事崩壞中</div>
+          <div class="hmp-desc">瘋狂填詞 · 故事爆笑</div>
+        </div>
+      </div>
     </div>
 
     <!-- Form card -->
@@ -153,6 +160,7 @@
           <button class="game-type-btn active" data-type="story">📖 故事接龍</button>
           <button class="game-type-btn" data-type="werewolf">🐺 狼人殺</button>
           <button class="game-type-btn" data-type="chaos">🎲 規則混亂</button>
+          <button class="game-type-btn" data-type="madlib">📝 故事崩壞中</button>
         </div>
 
         <!-- Story Settings -->
@@ -246,6 +254,16 @@
           </div>
           <p class="round-hint">每回合：寫句子 → 抽規則 → 修改別人的句子 → 評分投票</p>
           <button id="btn-start-chaos" class="btn btn-primary btn-full">開始規則混亂 🎲</button>
+        </div>
+
+        <!-- Madlib Settings -->
+        <div id="madlib-settings" class="hidden">
+          <div class="form-group">
+            <label for="madlib-answer-time">填詞時限（秒）</label>
+            <input type="number" id="madlib-answer-time" value="45" min="15" max="120">
+          </div>
+          <p class="round-hint">每輪玩家需在時限內填入對應詞彙，時間到自動送出</p>
+          <button id="btn-start-madlib" class="btn btn-primary btn-full">開始故事崩壞中 📝</button>
         </div>
 
         <div id="room-error" class="error-msg hidden"></div>
@@ -795,6 +813,62 @@
       <div id="chaos-end-badges" class="chaos-end-badges"></div>
       <button id="btn-chaos-end-reveal" class="btn btn-secondary btn-full hidden" style="margin-top:12px">✦ 揭露下一個獎項</button>
       <button id="btn-chaos-back-lobby" class="btn btn-ghost btn-full" style="margin-top:8px">← 返回大廳</button>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══ MADLIB GAME ══════════════════════════════════════════ -->
+<div id="screen-madlib" class="screen hidden">
+  <div class="bg-noise"></div>
+  <div class="madlib-wrap">
+
+    <!-- Spectator overlay -->
+    <div id="ml-spectator-overlay" class="ww-spectator-overlay hidden">
+      <div class="spec-badge">👁 觀戰模式</div>
+      <div id="ml-spectator-content" class="chaos-spectator-content"></div>
+    </div>
+
+    <!-- Header -->
+    <header class="chaos-header">
+      <span id="ml-header-info" class="chaos-header-info">故事崩壞中</span>
+      <div id="ml-timer-wrap" class="chaos-timer-wrap hidden">
+        <span class="chaos-timer-label">剩餘</span>
+        <span id="ml-timer-val" class="chaos-timer-val">45</span>
+        <span class="chaos-timer-label">秒</span>
+      </div>
+    </header>
+
+    <!-- Answering -->
+    <div id="ml-panel-answering" class="chaos-panel hidden">
+      <div id="ml-round-info" class="ml-round-info"></div>
+      <div id="ml-question-area" class="ml-question-area"></div>
+      <div id="ml-answer-progress" class="chaos-progress-text">0 / 0 人已提交</div>
+    </div>
+
+    <!-- Reveal -->
+    <div id="ml-panel-reveal" class="chaos-panel hidden">
+      <div class="chaos-phase-title">📖 故事揭示時刻！</div>
+      <div class="ml-reveal-header">
+        <span id="ml-reveal-title" class="ml-reveal-story-title"></span>
+        <span id="ml-reveal-progress" class="chaos-card-counter"></span>
+      </div>
+      <div id="ml-story-display" class="ml-story-display"></div>
+      <div class="ml-reveal-actions">
+        <button id="btn-ml-reveal" class="btn btn-primary hidden">✦ 揭示下一格</button>
+        <p id="ml-reveal-watch" class="chaos-progress-text hidden">等待主持人揭示…</p>
+      </div>
+    </div>
+
+    <!-- End -->
+    <div id="ml-panel-end" class="chaos-panel hidden">
+      <div class="chaos-end-header">
+        <div class="chaos-end-trophy">🎉</div>
+        <div id="ml-end-title" class="chaos-phase-title"></div>
+      </div>
+      <div class="chaos-phase-hint">這就是你們共同創作的故事！</div>
+      <div id="ml-end-story" class="ml-story-display ml-story-end"></div>
+      <button id="btn-ml-back" class="btn btn-ghost btn-full" style="margin-top:16px">← 返回大廳</button>
     </div>
 
   </div>

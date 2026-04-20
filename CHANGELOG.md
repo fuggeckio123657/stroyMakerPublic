@@ -1004,3 +1004,414 @@ V3.3.0 插入預言家 Modal 程式碼時，誤將原本 `if (amSeer && !amDone)
 
 ---
 
+## V 4.0.0 — 新遊戲：故事崩壞中 📝
+> 2026-04-13
+
+本版本為大版本，加入全新遊戲模式「故事崩壞中」（Mad Libs 瘋狂填詞）。
+
+**遊戲玩法：**
+
+系統從模板池隨機抽出一篇故事，故事有 Q 個空格，每格附一個填詞提示（如「一個人名」「一種動物」）。玩家**完全看不到故事本文**，只看到自己的提示，填詞後由系統彙整成一篇荒謬故事，並由主持人一格一格揭示。
+
+**回合分配演算法：**
+
+| 輪次類型 | 說明 | 計算公式 |
+|----------|------|----------|
+| 獨立輪 | 每人拿到不同問題，各填各的格子 | u = floor(Q / (P+1)) |
+| 共用輪 | 全員填同一個問題，系統隨機選一份填入 | s = Q − u × P |
+| 輪次順序 | 隨機混合穿插 | shuffle([ind×u, shared×s]) |
+
+驗算：Q=12, P=5 → u=2, s=2, 總輪次=4 ✓
+
+**主持人操作：**
+- 選擇故事模板（手選或隨機）
+- 開始填詞
+- 所有人提交後自動進入下一輪
+- 填詞結束後，一格一格揭示故事
+
+**3 篇初始故事模板：**
+
+| 模板 | 空格數 | 風格 |
+|------|--------|------|
+| ⚔️ 勇者的末日冒險 | 12 格 | 奇幻冒險 |
+| 💼 史上最慘的上班日 | 11 格 | 職場日常 |
+| 🚀 迷航星際探索隊 | 13 格 | 科幻探索 |
+
+**技術架構：**
+- `ML_TEMPLATES`：嵌入 JS 常數，方便直接修改
+- `MadlibTemplates`：統一存取介面，內建 `loadFromJSON(url)` 接口供未來從外部 JSON 擴充
+- `MadlibEngine`：完整遊戲引擎，含 timer、auto-submit（t=1 觸發）、回合分配、隨機選答
+- `makeMadlibGame()`：遊戲狀態工廠
+- `MADLIB_ACTION`：7 個動作常數
+- `_renderMadlib()`：完整 UI 渲染，含模板選擇、答題、揭示、結束四個相位
+- 觀戰模式：顯示當前輪次進度，不顯示答題區
+- 設定：填詞時限（15–120 秒，預設 45 秒）
+
+**設定面板：**
+- 新增「📝 故事崩壞中」遊戲類型按鈕（位於規則混亂右側）
+- 首頁模式徽章新增故事崩壞中
+
+---
+
+
+## V 4.0.1 — 故事崩壞中算法修正 + 黑屏修復 + 細節優化
+> 2026-04-14
+
+**1. 回合分配演算法修正**
+
+舊算法（錯誤）：`u = floor(Q/(P+1))`，剩餘全為共用輪。
+
+新正確算法：
+- `u = floor(Q/P)`：獨立輪數，每輪每人各答不同問題（覆蓋 u×P 格）
+- `r = Q mod P`：剩餘格數
+- **升級條件 u >= P/2**（利用分裂輪代替共用輪，提升刺激性）：
+  - `splitRounds = floor(r/2)`：每個分裂輪將玩家對半分為 A、B 組，各答不同問題，各自隨機抽一份填入（覆蓋 2 格）
+  - `sharedRounds = r mod 2`：若 r 為奇數，多一個全員共用輪（覆蓋 1 格）
+- 未觸發升級條件時，r 個剩餘全為傳統共用輪
+
+驗算 Q=15, P=4：u=3 ≥ P/2=2 ✓ → 3 獨立(12格)+1 分裂(2格)+1 共用(1格)=15格，總 5 輪 ✓
+
+**2. 非主持人開局黑屏修復**
+
+根本原因：Firebase 將 JS 陣列（`rounds`、`activePids`、`group_a`、`group_b`）以物件格式儲存（`{0:v,1:v,...}`），`Array.isArray()` 回傳 false，`roundsArr[cr]` 取值失敗 → `round` 為 `undefined` → 渲染提早 return → 黑畫面。
+
+修法：在 `_renderMadlibAnswering`、`_submitAnswer`、`_autoSubmitAll`、`_resolveCurrentRound` 全面加入防禦性正規化（`Array.isArray(x) ? x : Object.values(x || {})`）。
+
+**3. 移除空格編號 `#X` 顯示**
+
+玩家答題區不再顯示「空格 #N」，只顯示提示詞本身，更自然、更沉浸。
+
+**4. 不顯示輪次類型**
+
+答題區只顯示「第 N / M 輪」，不再顯示「獨立輪」「共用輪」「分裂輪」等技術術語。
+
+---
+
+
+## V 4.0.1 — 故事崩壞中五項修復 + 算法升級
+> 2026-04-14
+
+**1. 黑畫面修復（非房主玩家無法看到題目）**
+
+根本原因：`_sync` 中 `if (s.isHost) this._renderMadlib(s)` 使非房主跳過渲染。遊戲啟動後非房主只靠 `GAME_STATE_UPDATED` 事件觸發渲染，但後續計時器 tick 的 `patchGame` 不會觸發該事件，導致畫面停留在初始黑畫面。修法：移除 `isHost` 判斷，讓 `_sync` 對所有玩家執行 `_renderMadlib`。`data-card-key` 守衛已確保輸入框不被干擾。
+
+**2. 回合分配算法升級（分裂輪）**
+
+舊算法（錯誤）：`u = floor(Q/(P+1))` 個獨立輪，剩餘為共用輪。
+
+新算法：
+- `u = floor(Q/P)` 個獨立輪，覆蓋 u×P 格
+- `r = Q - u×P` 個剩餘格
+- 若 `u >= P/2`（獨立輪數達到人數一半）→ 升級 r 的處理方式：
+  - `floor(r/2)` 個**分裂輪**（玩家對半分為 A、B 兩組，各組答不同題，各組隨機抽 1 份填入）
+  - r 為奇數時 → +1 個**全員共用輪**（所有人答同一題，隨機抽 1 份）
+- 否則：r 個共用輪
+
+驗算：Q=15, P=4 → u=3, r=3, u>=2 → 3 獨立 + 1 分裂 + 1 共用 = 5 輪，覆蓋 12+2+1=15 格 ✓
+
+**3. 移除輪次類型顯示**
+
+答題介面只顯示「第 N / M 輪」，不再顯示「獨立輪／共用輪／分裂輪」。
+
+**4. 移除空格 #X 編號顯示**
+
+問題卡片只顯示提示文字，不顯示「空格 #X」。
+
+**5. Firebase 陣列序列化修復**
+
+`g.rounds` 通過 Firebase 時可能被序列化為物件（`{0:..., 1:...}`）而非陣列。修法：所有讀取 `g.rounds[cr]` 與 `g.rounds.length` 的地方改用 `Array.isArray()` 防衛式存取。
+
+---
+
+## V 4.0.2 — 故事崩壞中：開局黑屏修復（非房主看不到題目）
+> 2026-04-18
+
+**Bug 描述**
+
+房主按下「開始遊戲」後，其他玩家（非房主）畫面空白、看不到問題，必須等到房主自己送出答案後才會顯示。
+
+**根本原因**
+
+`startGame()` 初始化時 `answers: {}` 與 `submitted: {}` 皆為空物件。Firebase Realtime Database 將空物件視為 `null` 不予儲存，非房主客戶端接收到的 game state 中 `g.submitted` 與 `g.answers` 均為 `undefined`。
+
+`_renderMadlibAnswering()` 直接執行 `g.submitted[cr]`，對 `undefined` 取屬性 → 拋出 `TypeError` → 渲染函數提前中止 → 題目卡片永不顯示。
+
+等到房主送出第一筆答案後，`submitted` 才變為非空物件、Firebase 正常儲存，非房主才得以渲染——這正是「等房主送出後才顯示」的原因。
+
+**修法**
+
+在 `_renderMadlibAnswering`、`_renderMadlibSpectator` 中，所有直接對 `g.submitted[cr]` 與 `g.answers[cr]` 的存取，一律加上 `(g.submitted || {})` / `(g.answers || {})` 防禦層，共修正 5 處：
+
+- 自動送出判斷：`g.submitted[cr0]` → `(g.submitted || {})[cr0]`
+- 已送出狀態判斷：`g.submitted[cr]` → `(g.submitted || {})[cr]`
+- 進度人數計算：`g.submitted[cr]` → `(g.submitted || {})[cr]`
+- 顯示已送出答案：`g.answers[cr]` → `(g.answers || {})[cr]`
+- 觀戰者進度顯示：`g.submitted[cr]` → `(g.submitted || {})[cr]`
+
+---
+
+## V 4.0.3 — 故事崩壞中：時間到自動鎖定已輸入文字
+> 2026-04-18
+
+**新功能**
+
+計時結束時，系統自動將玩家已輸入但尚未手動送出的答案鎖定提交，不再顯示「（時間到）」字樣。只有 textarea 完全空白的玩家才會被標記為「（時間到）」。
+
+**根本原因（舊行為）**
+
+舊流程在 `t=1` 時，房主端 `_autoSubmitAll()` 先執行，把所有未提交的玩家（含非房主）都強制標記為 `'（時間到）'` 並廣播。非房主客戶端在 `t=1` 時嘗試讀取 textarea，但此時 `submitted[cr][myId]` 已被房主設為 `true`，guard 判斷「已提交」→ 跳過 textarea 讀取 → 玩家正在輸入的文字完全遺失，顯示「（時間到）」。
+
+**修法**
+
+分兩個面向：
+
+1. **房主端（`_startTimer`）**：在 `t=2` 時加入 textarea 擷取邏輯，若房主尚未提交且 textarea 有內容，立即以該內容呼叫 `_submitAnswer()`。空白 textarea 不處理，留給 `t=1` 的 `_autoSubmitAll()` 填入「（時間到）」。
+
+2. **非房主端（`_renderMadlib`）**：將自動提交觸發點從 `g.timeLeft === 1` 提前至 `g.timeLeft === 2`。這給了非房主客戶端約 2 秒（遠超 Firebase 往返延遲 ~100-300ms）讓 action 送達房主並被處理，確保 `_autoSubmitAll()` 執行時玩家已是「已提交」狀態，不會被覆蓋為「（時間到）」。
+
+**行為對照**
+
+| 情況 | 舊行為 | 新行為 |
+|------|--------|--------|
+| 玩家有輸入文字但未手動送出 | 顯示「（時間到）」 | 自動鎖定並提交已輸入文字 |
+| 玩家 textarea 完全空白 | 顯示「（時間到）」 | 顯示「（時間到）」（不變） |
+| 玩家已手動送出 | 正常顯示答案 | 正常顯示答案（不變） |
+
+---
+
+## V 4.0.4 — 自動提交：修復提早跳輪與畫面卡住
+> 2026-04-18
+
+**Bug 1：時間還有 2~3 秒就跳走（提早結算）**
+
+根本原因：t=2 時 host 捕捉 textarea 並呼叫 `_submitAnswer()`，其內部有「所有玩家都送出 → 立刻 `stopTimer()` + `_resolveCurrentRound()`」的邏輯。只要所有人都完成，round 就在 t=2 時提早結算，玩家感覺「還有幾秒就跳走了」。
+
+**Bug 2：換了下一輪，畫面仍卡在鎖定狀態**
+
+Bug 1 的連鎖效應：round 在 t=2 提早結算後，新 round 的 timer 立刻啟動。新 round 的 timer 跑到 t=2 時，non-host 的 client-side 觸發機制再次觸發，把上一輪未清除的 submitted 狀態誤讀或送出空的 action，和 host 的快速廣播產生競爭，UI 收不到正確的新輪狀態，停在上一輪的鎖定畫面。
+
+**修法（共 3 處）**
+
+1. **`_submitAnswer` 新增 guard**：僅在 `timeLeft > 2` 時允許提早結算。t≤2 時讓 timer 自然跑到 t=0 後由 `_resolveCurrentRound()` 結算，不再因 auto-capture 觸發競爭。
+
+2. **Host textarea 捕捉移回 `t=1`**：不再在 t=2 獨立捕捉，改為在 t=1 的區塊中先捕捉 host textarea（若有內容呼叫 `_submitAnswer`），再呼叫 `_autoSubmitAll()`，確保兩者在同一 tick 完成、順序確定。
+
+3. **Client-side auto-send 加入內容判斷**：只有 textarea 有文字才送出 action；空白 textarea 不送出，讓 host 端 `_autoSubmitAll` 在 t=1 統一標記「（時間到）」。防止空字串 action 干擾 host 狀態或觸發誤判。
+
+**完整時序（修復後）**
+
+```
+t=3  玩家繼續輸入…
+t=2  Non-host: textarea 有文字 → sendAction(SUBMIT_ANSWER, text)
+               textarea 空白   → 不動作（等 _autoSubmitAll）
+t=1  Host:  ① 讀自己的 textarea → 有文字 → _submitAnswer(myId, text)
+            ② _autoSubmitAll() → 對「仍未提交者」填入「（時間到）」並廣播
+t=0  stopTimer(); _resolveCurrentRound() → 推進到下一輪
+```
+
+---
+
+## V 4.0.5 — 自動提交：計時到零才鎖定，還原完整倒數體驗
+> 2026-04-18
+
+**問題**
+
+V4.0.3 / V4.0.4 的修法在 t=2 或 t=1 提前觸發 auto-submit，導致玩家看到「還有 2 秒」就被鎖定畫面，無法繼續輸入完整時間。
+
+**設計原則（重新確立）**
+
+> 玩家看到幾秒，就能打到幾秒；計時歸零後才鎖定。
+
+**修法（V4.0.5）**
+
+移除所有提前觸發邏輯，改為「t=0 同時觸發，host 等 400ms 視窗收齊 actions 再結算」：
+
+| 時機 | 誰 | 動作 |
+|------|----|------|
+| t=0，timer tick | Host | 捕捉自己的 textarea（有內容 → `_submitAnswer`） |
+| t=0，畫面更新 | Non-host | 讀 textarea（有內容 → `sendAction(SUBMIT_ANSWER)`） |
+| t=0 + 400ms | Host | `_autoSubmitAll()`（空白者標「時間到」）→ `_resolveCurrentRound()` |
+
+400ms 遠超 Firebase 正常往返延遲（~50–200ms），足以讓所有 non-host 的 action 抵達並被處理。
+
+**同步移除的舊機制**
+
+- Host：t=1 時的提前捕捉（已移除）
+- Non-host：t=2 時的提前 auto-send（改為 t=0）
+- `_submitAnswer` 中的 `timeLeft > 2` guard（已移除，恢復原始「全員提交即早結算」邏輯）
+
+---
+
+## V 4.0.6 — 自動提交：修復手動全員送出後下一輪被跳過
+> 2026-04-18
+
+**Bug**
+
+若所有玩家在計時歸零前手動送出答案，`_submitAnswer` 偵測到全員完成，呼叫 `stopTimer()` + `_resolveCurrentRound()` 提早結算並開始下一輪計時。但 `stopTimer()` 只清掉了 `setInterval`，t=0 掛上的 400ms `setTimeout` 仍在跑。400ms 後它醒來，對**新的一輪**再次呼叫 `_resolveCurrentRound()`，直接跳過該輪。
+
+**修法**
+
+以 `this._resolveTimer` 追蹤 400ms `setTimeout` 的 handle，並在 `stopTimer()` 中同時 `clearTimeout(this._resolveTimer)`。無論是手動全員提交還是計時自然歸零，`stopTimer()` 被呼叫時都會同時取消尚未執行的 resolve 排程，確保每輪只結算一次。
+
+---
+
+## V 4.0.7 — 自動提交：修復換輪後畫面卡在鎖定狀態
+> 2026-04-18
+
+**Bug**
+
+V4.0.6 的 `_resolveTimer` 追蹤機制未能涵蓋一個關鍵情境，導致新輪被跳過、非房主畫面卡在上一輪的鎖定狀態。
+
+**根本原因**
+
+t=0 的執行順序如下：
+
+```
+① stopTimer()                        ← 此時 _resolveTimer 仍為 null，clearTimeout 空操作
+② _submitAnswer(host, htxt)          ← 若所有非房主已手動提交完畢
+     → 全員已提交 → stopTimer()      ← _resolveTimer 仍 null，清不到任何東西
+     → _resolveCurrentRound()        ← 新一輪開始，currentRound += 1
+③ this._resolveTimer = setTimeout()  ← ★ 在早結算「之後」才被設定，stopTimer 沒機會清它
+```
+
+400ms 後 `_resolveTimer` 在「新一輪」上觸發 `_resolveCurrentRound()`，直接跳過新輪。非房主收不到新輪的有效狀態，停在舊輪的鎖定畫面。
+
+**修法**
+
+在設定 `_resolveTimer` 之前，先讀取 `store.get().game` 確認 `currentRound` 是否仍等於 `hcr`（且 `mlPhase === 'answering'`）。若 `_submitAnswer` 已觸發早結算導致 `currentRound` 改變，則跳過 `setTimeout`，不設定 timer。
+
+```js
+var afterG = store.get().game;
+if (afterG.currentRound === hcr && afterG.mlPhase === 'answering') {
+  this._resolveTimer = setTimeout(..., 400);
+}
+```
+
+---
+
+## V 4.0.8 — 修復換輪後部分玩家卡在鎖定畫面
+> 2026-04-18
+
+**Bug**
+
+手動送出答案後停在鎖定畫面的玩家，換輪後畫面不更新，仍顯示「等待其他人…」。
+
+**根本原因：`data-card-key` 設計邏輯錯誤**
+
+舊 key 格式：`cr + ':' + submitted + ':' + myQIdx`
+
+Guard 的用途是防止正在輸入的 textarea 被重建。但舊設計把三種狀態（textarea 輸入中 / 鎖定 / 無題）通通納入同一個 guard，產生錯誤保護：
+
+- 鎖定狀態（`submitted = true`）設完 key 後，guard 開始保護「這個鎖定畫面」
+- 換輪後，新輪的 `cr` 不同，理論上 key 不同，應觸發重建
+- 但在某些計時器廣播或 Firebase 更新的競爭條件下，render 函數被以舊的 `submitted=true` state 呼叫，key 仍匹配，guard 返回，**卡死在舊的鎖定畫面**
+
+**修法**
+
+Guard 只保護「真正需要保護的狀態」：textarea 輸入中（`!submitted`）。
+
+| 狀態 | 舊行為 | 新行為 |
+|------|--------|--------|
+| 無題（no-q） | guard 保護 | 每次直接重建，清除 key |
+| 鎖定（submitted=true） | guard 保護 | **每次直接重建**，清除 key |
+| 作答中（textarea） | guard 保護 | guard 保護（key = `cr:myQIdx`，不含 submitted） |
+
+key 格式同步簡化為 `cr + ':' + myQIdx`（移除 `submitted`），因為 guard 只在 `!submitted` 分支執行，`submitted` 已隱含為 false。
+
+---
+
+## V 4.0.9 — 換輪後仍卡鎖定：根治晚到 action 寫入新輪的問題
+> 2026-04-18
+
+**Bug**
+
+換下一輪後，部分玩家的畫面仍停留在「送出答案 / 等待其他人」的鎖定畫面，沒有顯示新一輪的題目與作答區。
+
+**根本原因**
+
+non-host 在 t=0 送出的 `SUBMIT_ANSWER` action **不包含 round index**。host 端的 `_submitAnswer` 永遠以 `store.get().game.currentRound` 決定要寫進哪一輪的 `submitted`。
+
+時序競爭：
+```
+t=0    non-host 送出 action（帶 Firebase 傳輸延遲）
+t=0+400ms  host: _autoSubmitAll → _resolveCurrentRound → 新輪開始（currentRound += 1）
+t=0+Xms    action 抵達，X > 400ms（網路延遲）
+           _submitAnswer 讀到 currentRound = 新輪
+           → submitted[新輪][myId] = true
+           → broadcast → non-host 收到新輪但已是鎖定狀態
+           → 卡在鎖定畫面，等所有人都送出才結算
+```
+
+**修法**
+
+在 `SUBMIT_ANSWER` action 中加入 `roundIdx` 欄位，host 端收到後校驗：
+
+1. **`_submitAnswer(pid, text, roundIdx)`**：新增 roundIdx 參數，若 `roundIdx !== undefined && roundIdx !== cr` 則直接 return，丟棄過期 action。
+
+2. **`_dispatch`**：透傳 `a.roundIdx` 至 `_submitAnswer`。
+
+3. **client auto-submit（t=0）**：`sendAction` 加入 `roundIdx: cr0`。
+
+4. **手動送出按鈕**：`sendAction` 加入 `roundIdx: cr`（由 closure 捕捉，保證是送出當下的輪次）。
+
+host 自身在 t=0 捕捉 textarea 時直接呼叫 `_submitAnswer(myId, text)`（不傳 roundIdx），guard 因 `roundIdx === undefined` 而略過驗證，行為不變。
+
+---
+
+## V 4.0.10 — 自動提交機制全面對齊規則混亂
+> 2026-04-18
+
+**改動**
+
+參照「規則混亂」（ChaosEngine）的自動提交設計，將故事崩壞中的計時與自動提交機制全面對齊，移除多版本累積的臨時補丁。
+
+**規則混亂的設計模式（作為參考）**
+
+```
+t=1  Client 送出 action（含已輸入文字或預設值）
+     ← Firebase 傳輸：~50–300ms，在 t=0 前抵達並被 host 處理完畢
+t=0  Host: stopTimer() → onExpire()
+          onExpire 填入未提交者的預設值 → 換輪/換階段
+```
+
+**故事崩壞中修改前後對比**
+
+| | V4.0.9（修改前） | V4.0.10（修改後） |
+|---|---|---|
+| Host t=0 | 捕捉自己 textarea → setTimeout(400ms) → _autoSubmitAll → _resolveCurrentRound | 直接 _autoSubmitAll → _resolveCurrentRound（同 Chaos） |
+| Client 觸發時機 | t=0 | **t=1**（同 Chaos） |
+| Client 空白時 | 不送出（讓 _autoSubmitAll 處理） | **送出 '（時間到）'**（同 Chaos，確保 host 收到完整 submission） |
+| roundIdx guard | 保留 | **保留**（雙重保險，防止極端網路延遲） |
+
+**為何移除 setTimeout**
+
+setTimeout(400ms) 是為了等待 non-host action 抵達而設計，但它引入了多個計時器競爭問題（V4.0.6、V4.0.7 均因此引入 bug）。改用 t=1 Client 送出後，action 在 t=0 的 host 解析前有完整 1 秒的傳輸窗口（Firebase 正常延遲 50–300ms），不需要額外等待。
+
+---
+
+## V 4.0.11 — 修復房主自動提交顯示「時間到」
+> 2026-04-18
+
+**Bug**
+
+房主使用自動繳交功能時，即使 textarea 有輸入內容，最終答案仍顯示「（時間到）」。
+
+**根本原因**
+
+t=1 的 client auto-submit 條件為 `!isHost && !isSpectator`，刻意排除了房主。房主在 t=0 時才由 `_autoSubmitAll()` 統一處理，但 `_autoSubmitAll` 不讀 textarea，直接對所有未提交者填入「（時間到）」，導致房主已輸入的內容被丟棄。
+
+**修法**
+
+移除條件中的 `!isHost`，改為 `!isSpectator`，讓房主與其他玩家走完全相同的路徑：
+
+```js
+// 修前
+if (phase === 'answering' && g.timeLeft === 1 && !isHost && !isSpectator)
+
+// 修後
+if (phase === 'answering' && g.timeLeft === 1 && !isSpectator)
+```
+
+房主呼叫 `madlibEngine.sendAction()` 時，`isHost` 分支走 `bus.emit(EVT.ACTION_RECEIVED, ...)` 本地同步處理，不經 Firebase，無延遲，與規則混亂（ChaosEngine）的設計完全一致。
+
+---
