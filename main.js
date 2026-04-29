@@ -609,7 +609,7 @@ class RoomManager {
   async createRoom(playerName) {
     const myId     = Utils.genId();
     const roomCode = Utils.genRoomCode();
-    store.set({ myId, myName: playerName, roomCode, isHost: true, hostId: myId, isSpectator: false });
+    store.set({ myId, myName: playerName, roomCode, isHost: true, hostId: myId, isSpectator: false, joinTs: Date.now() });
     await transport.createRoom(roomCode, myId, playerName);
     transport.watchReconnect(roomCode, myId, playerName, false);
     this._listen(roomCode, myId, true);
@@ -649,7 +649,7 @@ class RoomManager {
     const isSpectator = !!(wwStarted || storyStarted || chaosStarted || madlibStarted);
 
     const myId = Utils.genId();
-    store.set({ myId, myName: playerName, roomCode, isHost: false, hostId, isSpectator });
+    store.set({ myId, myName: playerName, roomCode, isHost: false, hostId, isSpectator, joinTs: Date.now() });
     await transport.addPlayer(roomCode, myId, playerName, isSpectator);
     transport.watchReconnect(roomCode, myId, playerName, isSpectator);
     this._listen(roomCode, myId, false);
@@ -694,7 +694,7 @@ class RoomManager {
     // Player presence
     transport.watchPlayers(
       roomCode,
-      (pid, data) => bus.emit(EVT.PLAYER_JOINED,  { id: pid, name: data.name, isSpectator: !!data.isSpectator }),
+      (pid, data) => bus.emit(EVT.PLAYER_JOINED,  { id: pid, name: data.name, isSpectator: !!data.isSpectator, joinedAt: data.joinedAt || 0 }),
       (pid)       => bus.emit(EVT.PLAYER_LEFT,    { id: pid }),
       (pid, data) => bus.emit(EVT.PLAYER_CHANGED, { id: pid, name: data.name, isSpectator: !!data.isSpectator }),
     );
@@ -747,8 +747,8 @@ class PlayerSync {
     bus.on(EVT.PLAYER_CHANGED, d => this._onChanged(d));
   }
 
-  _onJoin({ id, name, isSpectator }) {
-    const { players, myId, myName, hostId } = store.get();
+  _onJoin({ id, name, isSpectator, joinedAt }) {
+    const { players, myId, myName, hostId, joinTs } = store.get();
     store.set({
       players: Object.assign({}, players, {
         [id]: {
@@ -759,7 +759,23 @@ class PlayerSync {
         },
       }),
     });
-    if (id !== myId) bus.emit(EVT.TOAST, { msg: name + ' 加入了房間', type: 'info' });
+    if (id === myId) {
+      // Show success-join toast only when joining (not creating — host shows no toast here)
+      // joinTs is set just before addPlayer, so joinedAt should be >= joinTs for our own node.
+      // We show the toast here (on the PLAYER_JOINED event for self) so it fires after any
+      // initial-load child_added events, avoiding ordering issues.
+      if (!store.get().isHost) {
+        bus.emit(EVT.TOAST, { msg: '✅ 成功加入：房間代碼：' + store.get().roomCode, type: 'success' });
+      }
+    } else {
+      // Only show "xxx 加入了房間" for players who joined AFTER we did.
+      // joinedAt comes from Firebase data; joinTs is when we started listening.
+      // If joinedAt is before our joinTs, it's an initial-load event (existing room member).
+      const myJoinTs = joinTs || 0;
+      if ((joinedAt || 0) >= myJoinTs) {
+        bus.emit(EVT.TOAST, { msg: name + ' 加入了房間', type: 'info' });
+      }
+    }
   }
 
   _onLeave({ id }) {
@@ -2374,7 +2390,7 @@ const ML_TEMPLATES = [
       '一個地點',
       '一種動物（複數）',
       '一個物品',
-      '另一種物品',
+      '一種物品',
       '一種職業',
       '一句奇怪的話',
       '一個事件',
@@ -2795,7 +2811,7 @@ const ML_TEMPLATES = [
     '一個名詞',         // 0
     '一個環境/地點',     // 1
     '一個名詞',         // 2
-    '另一個名詞',       // 3
+    '一個名詞',       // 3
     '一種物質/東西',     // 4
     '一種工具',         // 5
     '一個物理屬性/名詞', // 6
@@ -2949,7 +2965,7 @@ const makeMadlibGame = () => ({
   gameType          : 'madlib',
   mlPhase           : 'answering',         // answering | reveal | end
   selectedTemplateId: null,
-  rounds            : [],   // [{type:'independent'|'shared', questionIdxs?, questionIdx?, assignments?:{pid:qIdx}}]
+  rounds            : [],   // [{type:'independent'|'buffer', questionIdxs?, assignments?:{pid:qIdx}, slots?:[{questionIdx,pids}]}]
   currentRound      : 0,
   answers           : {},   // { roundIdx: { pid: text } }
   submitted         : {},   // { roundIdx: { pid: true } }
@@ -3011,61 +3027,64 @@ class MadlibEngine {
   // Template selection methods removed (Fix 3 — pure random, nobody sees template beforehand)
 
   // ── Round distribution algorithm ──────────────────────
-  // ── Round distribution algorithm ──────────────────────
-  // u = floor(Q/P) independent rounds, each covering P blanks (one per player)
-  // r = Q - u*P remaining blanks
-  // If u >= P/2: upgrade → floor(r/2) split rounds + (1 shared if r odd)
-  //   split round: players split in half; each half answers a different question; random pick per group
-  // Else: r shared rounds (all answer same question, random pick)
-  // Verified: Q=15, P=4 → u=3, r=3, u>=2 → 3 ind + 1 split + 1 shared = 5 rounds ✓
+  // ── Round distribution algorithm — Best Fit ───────────
+  //
+  // N = ceil(Q / P)   → total rounds
+  // u = floor(Q / P)  → independent rounds
+  // r = Q - u * P     → remaining blanks  (0 ≤ r < P)
+  //
+  // If r === 0: all N rounds are independent.
+  // If r > 0  : N = u + 1; the last round is a single "buffer" round
+  //   that packs all r blanks into one round where every player answers exactly once.
+  //
+  //   k_base = floor(P / r)   → base players per slot
+  //   m      = P mod r        → slots that get one extra player
+  //
+  //   Slots: m slots of (k_base+1) players, (r-m) slots of k_base players
+  //   Collab slots (pids.length > 1): random pick at resolve, skipping timeout/empty.
+  //
+  // Examples:
+  //   Q=15, P=4 → u=3, r=3, k=1, m=1 → 3 ind + 1 buffer(slots:2,1,1 pids) = 4 rounds ✓
+  //   Q=10, P=3 → u=3, r=1, k=3, m=0 → 3 ind + 1 buffer(slot:3 pids)      = 4 rounds ✓
+  //   Q=12, P=4 → u=3, r=0            → 3 ind (no buffer)                  = 3 rounds ✓
   _computeRounds(Q, P, pids) {
     if (P === 0) return [];
     var u = Math.floor(Q / P);
     var r = Q - u * P;
-    var useUpgrade = (u >= P / 2);  // trigger when u >= half of player count
 
-    // Decide sub-round types for the r remaining blanks
-    var subRounds = [];
-    if (useUpgrade && r > 0) {
-      var splitCount = Math.floor(r / 2);
-      for (var i = 0; i < splitCount; i++) subRounds.push('split');
-      if (r % 2 === 1) subRounds.push('shared');
-    } else {
-      for (var j = 0; j < r; j++) subRounds.push('shared');
-    }
-
-    // Build type list (u independent + sub-rounds) and shuffle
-    var types = [];
-    for (var k = 0; k < u; k++) types.push('independent');
-    subRounds.forEach(function(t) { types.push(t); });
-    types = Utils.shuffle(types);
-
-    // Assign question indices randomly
+    // Randomly ordered question indices
     var allQIdxs = Utils.shuffle(Array.from({ length: Q }, function(_, k) { return k; }));
     var qi = 0;
 
-    return types.map(function(type) {
-      if (type === 'independent') {
-        var questionIdxs = allQIdxs.slice(qi, qi + P);
-        qi += P;
-        var shuffledPids = Utils.shuffle(pids.slice());
-        var assignments = {};
-        shuffledPids.forEach(function(pid, idx) { assignments[pid] = questionIdxs[idx]; });
-        return { type: 'independent', questionIdxs: questionIdxs, assignments: assignments };
-      } else if (type === 'split') {
-        var qIdxA = allQIdxs[qi++];
-        var qIdxB = allQIdxs[qi++];
-        var shuffledAll = Utils.shuffle(pids.slice());
-        var halfLen = Math.floor(P / 2);
-        // group_a gets ceil(P/2) players (if P odd, larger group), group_b gets floor(P/2)
-        var groupA = shuffledAll.slice(0, Math.ceil(P / 2));
-        var groupB = shuffledAll.slice(Math.ceil(P / 2));
-        return { type: 'split', questionIdx_a: qIdxA, questionIdx_b: qIdxB, group_a: groupA, group_b: groupB };
-      } else {
-        var qIdx = allQIdxs[qi++];
-        return { type: 'shared', questionIdx: qIdx };
+    // Build independent rounds
+    var rounds = [];
+    for (var i = 0; i < u; i++) {
+      var questionIdxs = allQIdxs.slice(qi, qi + P);
+      qi += P;
+      var shuffledPids = Utils.shuffle(pids.slice());
+      var assignments = {};
+      shuffledPids.forEach(function(pid, idx) { assignments[pid] = questionIdxs[idx]; });
+      rounds.push({ type: 'independent', questionIdxs: questionIdxs, assignments: assignments });
+    }
+
+    // Build buffer round if r > 0
+    if (r > 0) {
+      var kBase = Math.floor(P / r);  // base players per slot
+      var m     = P % r;              // slots that get one extra player
+      var shuffledAll = Utils.shuffle(pids.slice());
+      var playerIdx = 0;
+      var slots = [];
+      for (var s = 0; s < r; s++) {
+        var slotSize = kBase + (s < m ? 1 : 0);
+        var slotPids = shuffledAll.slice(playerIdx, playerIdx + slotSize);
+        playerIdx += slotSize;
+        slots.push({ questionIdx: allQIdxs[qi++], pids: slotPids });
       }
-    });
+      rounds.push({ type: 'buffer', slots: slots });
+    }
+
+    // Shuffle so buffer doesn't always land at the end
+    return Utils.shuffle(rounds);
   }
 
   // ── Timer ─────────────────────────────────────────────
@@ -3093,10 +3112,12 @@ class MadlibEngine {
     const round = rounds2[cr] || {};
     const activePidsNorm2 = Array.isArray(g.activePids) ? g.activePids : Object.values(g.activePids || {});
     var pidsToSubmit = [];
-    if (round.type === 'split') {
-      var ga = Array.isArray(round.group_a) ? round.group_a : Object.values(round.group_a || {});
-      var gb = Array.isArray(round.group_b) ? round.group_b : Object.values(round.group_b || {});
-      pidsToSubmit = ga.concat(gb);
+    if (round.type === 'buffer') {
+      var slotsNorm = Array.isArray(round.slots) ? round.slots : Object.values(round.slots || {});
+      slotsNorm.forEach(function(slot) {
+        var sp = Array.isArray(slot.pids) ? slot.pids : Object.values(slot.pids || {});
+        pidsToSubmit = pidsToSubmit.concat(sp);
+      });
     } else {
       pidsToSubmit = activePidsNorm2;
     }
@@ -3134,10 +3155,17 @@ class MadlibEngine {
     var roundsNorm = Array.isArray(g.rounds) ? g.rounds : Object.values(g.rounds || {});
     var round2 = roundsNorm[cr] || {};
     var activePidsNorm = Array.isArray(g.activePids) ? g.activePids : Object.values(g.activePids || {});
-    var relevantPids = round2.type === 'split'
-      ? (Array.isArray(round2.group_a) ? round2.group_a : Object.values(round2.group_a || {}))
-          .concat(Array.isArray(round2.group_b) ? round2.group_b : Object.values(round2.group_b || {}))
-      : activePidsNorm;
+    var relevantPids;
+    if (round2.type === 'buffer') {
+      var slotsNorm2 = Array.isArray(round2.slots) ? round2.slots : Object.values(round2.slots || {});
+      relevantPids = [];
+      slotsNorm2.forEach(function(slot) {
+        var sp = Array.isArray(slot.pids) ? slot.pids : Object.values(slot.pids || {});
+        relevantPids = relevantPids.concat(sp);
+      });
+    } else {
+      relevantPids = activePidsNorm;
+    }
     // All players submitted before time is up → resolve early.
     if (relevantPids.every(function(p) { return submitted[cr][p]; })) {
       this.stopTimer();
@@ -3173,24 +3201,22 @@ class MadlibEngine {
         var qIdx = asgn[pid];
         selectedAnswers[qIdx] = roundAnswers[pid] || '（未填寫）';
       });
-    } else if (round.type === 'split') {
-      // Two groups each answer a different blank; randomly pick one per group
-      var pickFrom = function(groupPids, qIdx) {
-        var gpArr = Array.isArray(groupPids) ? groupPids : Object.values(groupPids || {});
-        var cands = gpArr.filter(function(p) { return roundAnswers[p]; });
-        if (cands.length === 0) cands = gpArr;
-        var pick = cands[Math.floor(Math.random() * cands.length)];
-        selectedAnswers[qIdx] = (pick && roundAnswers[pick]) || '（未填寫）';
-      };
-      pickFrom(round.group_a, round.questionIdx_a);
-      pickFrom(round.group_b, round.questionIdx_b);
-    } else {
-      // Shared: all answer same blank; randomly pick one
-      var activePidsR = Array.isArray(g.activePids) ? g.activePids : Object.values(g.activePids || {});
-      var candidates = activePidsR.filter(function(p) { return roundAnswers[p]; });
-      if (candidates.length === 0) candidates = activePidsR.slice();
-      var chosen = candidates[Math.floor(Math.random() * candidates.length)];
-      selectedAnswers[round.questionIdx] = roundAnswers[chosen] || '（未填寫）';
+    } else if (round.type === 'buffer') {
+      // Buffer: each slot has 1+ players; pick best answer per slot.
+      // Prefer answers that are not empty/timeout. If all are bad, fall back to any.
+      var TIMEOUT_MARKER = '（時間到）';
+      var EMPTY_MARKER   = '（空白）';
+      var slotsR = Array.isArray(round.slots) ? round.slots : Object.values(round.slots || {});
+      slotsR.forEach(function(slot) {
+        var slotPids = Array.isArray(slot.pids) ? slot.pids : Object.values(slot.pids || {});
+        var good = slotPids.filter(function(p) {
+          var a = roundAnswers[p];
+          return a && a !== TIMEOUT_MARKER && a !== EMPTY_MARKER;
+        });
+        var pool = good.length > 0 ? good : slotPids;
+        var pick = pool[Math.floor(Math.random() * pool.length)];
+        selectedAnswers[slot.questionIdx] = (pick && roundAnswers[pick]) || '（未填寫）';
+      });
     }
 
     const nextRound = cr + 1;
@@ -6980,14 +7006,11 @@ class UIController {
     var roundsArr = Array.isArray(g.rounds) ? g.rounds : Object.values(g.rounds || {});
     var round = roundsArr[cr];
     if (!round) return;
-    // Also normalize group arrays inside split rounds (Firebase object→array)
-    if (round.type === 'split') {
-      if (round.group_a && !Array.isArray(round.group_a)) round = Object.assign({}, round, { group_a: Object.values(round.group_a) });
-      if (round.group_b && !Array.isArray(round.group_b)) round = Object.assign({}, round, { group_b: Object.values(round.group_b) });
+    // Normalize buffer slots array (Firebase object→array)
+    if (round.type === 'buffer' && round.slots && !Array.isArray(round.slots)) {
+      round = Object.assign({}, round, { slots: Object.values(round.slots) });
     }
-    if (round.type === 'independent' && round.assignments && typeof round.assignments === 'object') {
-      // assignments is {pid: qIdx} — already an object, no normalization needed
-    }
+    // assignments is {pid: qIdx} — already an object, no normalization needed for independent
     var template = MadlibTemplates.getById(g.selectedTemplateId);
     if (!template) return;
     var totalRounds = roundsArr.length;
@@ -7005,28 +7028,31 @@ class UIController {
 
     // My question index — depends on round type
     var myQIdx = null;
-    var inSplitA = false, inSplitB = false;
     if (round.type === 'independent') {
       myQIdx = (round.assignments || {})[myId];
-    } else if (round.type === 'split') {
-      // Determine which group this player is in
-      var grpA = Array.isArray(round.group_a) ? round.group_a : Object.values(round.group_a || {});
-      var grpB = Array.isArray(round.group_b) ? round.group_b : Object.values(round.group_b || {});
-      inSplitA = grpA.indexOf(myId) >= 0;
-      inSplitB = grpB.indexOf(myId) >= 0;
-      if (inSplitA) myQIdx = round.questionIdx_a;
-      else if (inSplitB) myQIdx = round.questionIdx_b;
-    } else {
-      myQIdx = round.questionIdx;
+    } else if (round.type === 'buffer') {
+      // Find which slot this player belongs to
+      var slotsRender = Array.isArray(round.slots) ? round.slots : Object.values(round.slots || {});
+      for (var si = 0; si < slotsRender.length; si++) {
+        var slotPidsR = Array.isArray(slotsRender[si].pids) ? slotsRender[si].pids : Object.values(slotsRender[si].pids || {});
+        if (slotPidsR.indexOf(myId) >= 0) { myQIdx = slotsRender[si].questionIdx; break; }
+      }
     }
     var myPrompt = (myQIdx !== undefined && myQIdx !== null) ? template.prompts[myQIdx] : null;
 
     // Progress — normalize activePids (Firebase may serialize as object)
     var activePidsNorm = Array.isArray(g.activePids) ? g.activePids : Object.values(g.activePids || {});
-    var relevantPids = round.type === 'split'
-      ? (Array.isArray(round.group_a) ? round.group_a : Object.values(round.group_a || {}))
-          .concat(Array.isArray(round.group_b) ? round.group_b : Object.values(round.group_b || {}))
-      : activePidsNorm;
+    var relevantPids;
+    if (round.type === 'buffer') {
+      var slotsRP = Array.isArray(round.slots) ? round.slots : Object.values(round.slots || {});
+      relevantPids = [];
+      slotsRP.forEach(function(slot) {
+        var sp = Array.isArray(slot.pids) ? slot.pids : Object.values(slot.pids || {});
+        relevantPids = relevantPids.concat(sp);
+      });
+    } else {
+      relevantPids = activePidsNorm;
+    }
     var submittedCount = relevantPids.filter(function(p) { return !!((g.submitted || {})[cr] || {})[p]; }).length;
     var totalCount     = relevantPids.length;
     var progEl = document.getElementById('ml-answer-progress');
@@ -7059,6 +7085,12 @@ class UIController {
         '</div>' +
         '<div class="ml-waiting-dots">等待其他人…<div class="wl-dots"><span></span><span></span><span></span></div></div>';
       var unBtn = qArea.querySelector('.ml-unsubmit-btn');
+      // Store the previously submitted answer on the area so that when the card rebuilds
+      // (after unsubmit clears data-card-key), the textarea can be pre-filled with it.
+      // Scope it with cardKey so it doesn't bleed into a different round/question.
+      var prevCardKey = cr + ':' + String(myQIdx);
+      qArea.setAttribute('data-prev-ans', myAns);
+      qArea.setAttribute('data-prev-ans-key', prevCardKey);
       if (unBtn) unBtn.addEventListener('click', function() {
         madlibEngine.sendAction({ type: MADLIB_ACTION.UNSUBMIT_ANSWER });
       });
@@ -7068,6 +7100,14 @@ class UIController {
       var cardKey = cr + ':' + String(myQIdx);
       if (qArea.getAttribute('data-card-key') === cardKey) return;
       qArea.setAttribute('data-card-key', cardKey);
+      // Restore previously submitted answer (if player just pressed "取消，重新填寫")
+      // Only apply if the stored key matches this card — prevents bleeding into the next round.
+      var prevAns = '';
+      if (qArea.getAttribute('data-prev-ans-key') === cardKey) {
+        prevAns = qArea.getAttribute('data-prev-ans') || '';
+      }
+      qArea.removeAttribute('data-prev-ans');
+      qArea.removeAttribute('data-prev-ans-key');
       qArea.innerHTML =
         '<div class="ml-question-card">' +
           '<div class="ml-q-prompt">' + Utils.escapeHtml(myPrompt) + '</div>' +
@@ -7076,6 +7116,8 @@ class UIController {
         '</div>';
       var subBtn = qArea.querySelector('.ml-submit-btn');
       var inp    = qArea.querySelector('#ml-answer-input');
+      // Restore the previous answer text so the player can edit it rather than starting blank
+      if (inp && prevAns) inp.value = prevAns;
       var doSubmit = function() {
         var txt = inp ? inp.value.trim() : '';
         if (!txt) return;
