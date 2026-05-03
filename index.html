@@ -29,7 +29,7 @@
       <div class="home-crown-ring">
         <span class="home-crown-icon">🎮</span>
       </div>
-      <h1 class="home-main-title">派對遊戲室</h1>
+      <h1 class="home-main-title" data-text="派對遊戲室">派對遊戲室</h1>
       <p class="home-main-sub">PARTY GAME ROOM</p>
       <div class="home-title-divider">
         <span class="htd-line"></span>
@@ -156,11 +156,15 @@
         </div>
 
         <!-- Game Type Switcher -->
-        <div class="game-type-switcher">
-          <button class="game-type-btn active" data-type="story">📖 故事接龍</button>
-          <button class="game-type-btn" data-type="werewolf">🐺 狼人殺</button>
-          <button class="game-type-btn" data-type="chaos">🎲 規則混亂</button>
-          <button class="game-type-btn" data-type="madlib">📝 故事崩壞中</button>
+        <div class="game-type-rail">
+          <button class="gts-arrow gts-arrow-left" aria-label="向左捲動">&#8249;</button>
+          <div class="game-type-switcher">
+            <button class="game-type-btn active" data-type="story">📖 故事接龍</button>
+            <button class="game-type-btn" data-type="werewolf">🐺 狼人殺</button>
+            <button class="game-type-btn" data-type="chaos">🎲 規則混亂</button>
+            <button class="game-type-btn" data-type="madlib">📝 故事崩壞中</button>
+          </div>
+          <button class="gts-arrow gts-arrow-right" aria-label="向右捲動">&#8250;</button>
         </div>
 
         <!-- Story Settings -->
@@ -295,6 +299,8 @@
           <button id="btn-leave-spec" class="btn-leave-spec">🎮 退出觀戰，回到玩家列表</button>
         </div>
       </div>
+
+
 
     </div>
   </div>

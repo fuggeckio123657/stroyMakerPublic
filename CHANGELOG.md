@@ -1488,3 +1488,211 @@ m      = P mod r        → 多塞一人的 slot 數量
 | `shared` | 全員答同一題，隨機抽一個 |
 
 兩者統一由 `buffer` 輪的 slot 機制取代，邏輯更一致且覆蓋更多人數組合。
+
+## V 4.2.0 — UI 動畫升級 + 大廳介面重構（大幅翻新）
+> 2026-04-30
+
+### 動畫系統
+
+- **頁面切換**：`.screen` 加入 `screenFadeIn`，淡入同時向上浮動 12px，消除生硬閃現
+- **卡片進場**：`.card`、`.panel`、`.home-card` 以 `cardRise` 從下方浮入並輕微縮放，staggered 感
+- **按鈕 Ripple**：點擊時從點擊位置向外擴散圓形光暈（純 CSS `::after` + `cubic-bezier`）
+- **按鈕彈性縮放**：按下時以彈性曲線壓縮 `.955`，鬆開後回彈
+- **玩家進房**：新玩家項目從左側滑入並彈跳（`playerJoin`），使「有人加入」的感受更明確
+- **輸入框聚焦**：`box-shadow` 以 cubic-bezier 緩動展開
+
+### Toast 系統升級
+
+- 新增圖示欄（`✓` / `✕` / `✦` / `⚠`），類型一眼可辨
+- 毛玻璃背景（`backdrop-filter: blur(16px)`）+ 各類型獨立深色底色與彩色邊框
+- 每次觸發先強制隱藏再播放進場動畫，避免重複彈出時畫面無反應
+- 隱藏時向下位移 + 縮小，進場時上浮，方向感一致
+
+### 大廳介面重構（v2）
+
+**頂部代碼列**
+- sticky 毛玻璃（`backdrop-filter: blur(24px) saturate(160%)`），深色背景讓文字清晰浮現
+- 房間代碼字體放大至 `2rem`、字距 12px、金色漸層 + 呼吸光暈動畫（`codeBreathe`）
+- 底部 inset 高光線讓整條 topbar 有「立體懸浮」感
+
+**背景氛圍光**
+- 大廳頁面加入兩道 `radial-gradient` 環境光（金 / 青），對角分佈，讓空白區域不再死黑
+
+**面板**
+- `border-radius: 20px` + 雙層 `box-shadow`（inset 頂部高光 + 外部深陰影）
+- `backdrop-filter: blur(16px)` 毛玻璃，面板懸浮感大幅提升
+- hover 時陰影加深，有輕微「被選中」的回饋
+
+**Panel Header 統一修正**
+- 所有 `.panel-header`（包含非房主的「遊戲設定 👁 唯讀」）背景設為 `transparent`，不再出現顏色不一致的淺色條帶
+- 字色降為 `rgba(255,255,255,.30)`，視覺層次清晰但不喧賓奪主
+
+**設定面板內容區域**
+- `#story-settings`、`#ww-settings` 等區塊補上 `padding: 16px 20px 20px`，修復文字貼邊問題
+
+**玩家列表**
+- 每項 hover 時 `translateX(2px)` 微移，配合邊框亮起，互動感更明確
+- 頭像 hover 以彈性曲線放大至 `scale(1.1)` + 加深陰影
+- 主持人項目金框 + 金底，視覺識別度大幅提高
+
+**開始按鈕**
+- hover 上浮 `-3px` + 長陰影發光，主按鈕的視覺重量感顯著增強
+
+> 所有更動均不影響任何遊戲邏輯與資料流，僅為純 UI/UX 升級。
+
+## V 4.2.1 — 修正大廳 UI 細節 + 首頁 UI 升級
+> 2026-05-01
+
+### 修正（大廳）
+
+- **房間代碼列不再懸浮**：移除 `position: sticky`，改回隨頁面捲動的靜態配置，不遮擋遊戲內容
+- **設定面板 — 人數上限列貼邊修正**：`.form-inline-row` 補上 `padding-left/right: 20px`，修復房主「房間人數上限」那行文字緊貼邊框的問題
+- **非房主「遊戲設定 👁 唯讀」panel-header 背景**：確保 `background: transparent !important` 生效，消除 header 背景色比 panel 主體顯著偏亮的異常
+
+### 升級（首頁）
+
+**氛圍光**
+- 頁面加入雙色對角環境光（青 + 金），讓純黑背景有空間深度感
+
+**Crown ring**
+- 光環從 2 層擴展至 4 層，外圍加上第三道半透明青色暈光
+- 呼吸動畫幅度加大，更有存在感
+
+**Game mode pills**
+- 每個 pill 加入 hover 時的斜向 shimmer 光（`::after` + `linear-gradient`）
+- 各遊戲模式的 hover 發光色區分：狼人 → 橘紅、混沌 → 紫、故事崩壞 → 青
+- hover 上浮距離從 `-4px` 提升至 `-6px`，配合彈性曲線，更有「被提起」的感受
+
+**Form card**
+- 卡片頂邊加入一條弧形高光線（`::before`），強化玻璃質感
+- 陰影層次更深（雙層 `box-shadow`），卡片懸浮感更強烈
+
+**建立房間按鈕**
+- 加入 `::before` 頂部半透明光澤層，模擬立體按鈕質感
+- hover 時上浮 `-3px`，`box-shadow` 發光範圍大幅加大
+- 點擊時壓縮 `scale(.98)` 有實體回饋感
+
+**整體調整**
+- `home-field-label` 字色調至 `rgba(255,255,255,.28)`，與 panel-header 層次一致
+- placeholder 透明度從 `.55` 調降至 `.45`，視覺更雅致
+- 各間距微調，整體呼吸空間更足
+
+## V 4.2.2 — 頂部列修正 + 首頁視覺大幅升級（亮點版）
+> 2026-05-01
+
+### 修正
+
+- **房間代碼列單行顯示**：移除 `.room-topbar` 的 `flex-wrap: wrap`，改為 `nowrap`，確保「房間代碼 📋 ← 離開」永遠在同一行
+
+### 首頁升級 — 結構性視覺亮點
+
+**動態網格背景**
+- 全頁加入金色細線網格（`linear-gradient` 疊加），帶有漂移動畫（`gridDrift`）
+- 搭配 `mask-image` 讓網格只在中心區域顯現，邊緣自然消散，精緻感大幅提升
+
+**標題光束掃過（Beam Sweep）**
+- 標題文字上方疊加一道高速掃過的白色光束（`::after` + `titleBeam` 動畫），5 秒一循環
+- 副標題字距有輕微呼吸動畫（`subtitleFade`），細節但有質感
+
+**Crown ring 旋轉弧線**
+- 主圓圈外加兩道以不同速度和方向旋轉的虛線弧（`::before` / `::after`）
+- 主圖示（🎮）加入上下浮動動畫（`iconFloat`）
+
+**Game mode pill — 橫掃式 Shimmer**
+- hover 時不只發光，而是有一道光從左往右橫掃過整個 pill（`::before` + transition）
+- 真正做到「被選中」時有光感變化，而非只是邊框顏色改變
+
+**建立房間按鈕 — 持續自動 Shimmer**
+- 按鈕在靜止狀態下每 4 秒自動掃過一道光（`btnShimmer`），視覺上持續活躍
+- 頂部光澤層（`::before`）讓按鈕有真實的塑料/玻璃質感
+
+**卡片角落光暈**
+- 卡片右上角加入一道金色徑向漸層暈光（`::after`），讓整張卡片感覺有光源照射
+
+## V 4.2.3 — 大廳空白修正 + 首頁邊界修正 + 細節升級
+> 2026-05-01
+
+### 修正
+
+**1. 大廳右側空白區域**
+根本原因：`settings-panel` 和 `waiting-panel` 預設帶 `hidden` class，但 CSS grid 仍保留第二欄空間。
+修法：使用 `:has(.settings-panel.hidden):has(.waiting-panel.hidden)` 偵測兩個右側面板皆隱藏時，將 `grid-template-columns` 收縮為單欄，空白完全消失。
+
+**2. 首頁黑色邊界**
+根本原因：`.screen` 基礎樣式帶有 `padding: 28px 16px`，首頁的 `.home-center` 在外層已有自己的 padding，導致四周出現多餘間距。
+修法：對 `#screen-home` 單獨覆寫 `padding: 0; display: block`，讓 `.home-center` 直接延伸至螢幕邊緣。
+
+**3. 房間代碼縮小**
+字體從 `2rem` 縮至 `1.3rem`，字距從 12px 降至 7px，視覺上不再佔據過多注意力，代碼仍清晰可讀。
+
+**4. Toast 移除不必要 emoji**
+移除 `✓` / `✕` / `✦` / `⚠` 圖示 span，Toast 改回純文字顯示，避免與訊息內容中的 emoji 重複或衝突。
+
+**5. 建立中 / 加入中動畫**
+- 按鈕進入 disabled 狀態時同步加上 `btn-loading` class，視覺上降低不透明度並禁止互動
+- loading bar 動畫升級：掃光條改為帶有白色高光的漸層（`transparent → gold → white → gold → transparent`），更有質感
+- 文字循環動畫點：「建立中」→「建立.」→「建立..」→「建立」循環（每 420ms），清晰呈現系統正在處理
+- loading bar 出現時帶有 `fadeSlideUp` 進場動畫
+
+## V 4.2.4 — 修正大廳右側空白區域
+> 2026-05-01
+
+**根本原因**：大廳右側有三個面板（`settings-panel`、`waiting-panel`、`spectator-lobby-panel`），在非房主且非觀戰狀態之外的情境下三者全部帶有 `hidden` class，但 CSS grid 的第二欄仍保留空間，形成一大片空白。
+
+**修法**：
+1. HTML：將三個右側面板包入 `<div class="room-right">` wrapper
+2. CSS：以 `:has(.room-right > .panel:not(.hidden))` 判斷右側是否有任何可見面板
+   - 有可見面板 → 維持雙欄 grid（左 1fr / 右 1.6fr）
+   - 無可見面板 → 收縮為單欄，玩家列表自然置中，不留空白
+
+## V 4.2.5 — 遊戲模式列 UI 重設計 + 手機版空白修正
+> 2026-05-02
+
+**1. 手機版右側空白修正**
+
+根本原因：`#screen-room::before` 的裝飾光暈固定寬度 `900px`，在手機螢幕（375px）上向右延伸 262px 超出視窗，且 `#screen-room` 沒有裁切，導致頁面可橫向捲動，右側出現一片空白。
+
+修法：
+- `#screen-room` 加上 `overflow-x: hidden`
+- `::before` 寬度從固定 `900px` 改為 `100%`，`radial-gradient` 自然延伸至螢幕邊緣不留硬切邊
+- 移除 `body { overflow-x: hidden }`（此屬性套在 body 上會抑制子元素的橫向捲動容器）
+
+**2. 遊戲模式列全面重設計**
+
+廢除原本「盒子包按鈕」架構，改為可橫向捲動的 Pill 膠囊軌道：
+
+- 每個模式改為圓潤 Pill 按鈕，未選中時低調半透明，選中時金色光暈 + 內嵌發光陰影
+- hover 有 `-1px` 微浮動，Active 狀態走金色漸層主題
+- 加入 `<div class="game-type-rail">` 包裝層，提供結構基礎
+
+**3. 左右捲動箭頭**
+
+- rail 兩側各加一顆 28px 圓形箭頭按鈕（`‹` / `›`）
+- 每次點擊捲動 160px，使用 `scrollBy({ behavior: 'smooth' })`
+- 箭頭永遠顯示；滾至邊緣時降 opacity 至 0.25 並改為 `cursor: not-allowed`
+- `MutationObserver` 監視 `settings-panel` 顯示狀態，面板出現後重新計算箭頭狀態
+
+**4. 漸層淡出**
+
+- `::before` / `::after` 絕對定位疊在捲動容器上方（`z-index: 1`，箭頭 `z-index: 2`）
+- 從 rail 邊緣向內 72px 做水平漸層（`#1c1a23 → transparent`）
+- 箭頭在漸層內浮現，無懸空黑影
+
+**5. 擴充性**
+
+新增模式只需在 HTML 加一行 `<button class="game-type-btn">`，無需改 CSS 或 JS
+
+---
+
+## V 4.2.6 — 觀戰強化 + 介面修正 + 藏了彩蛋
+> 2026-05-02
+
+**1. 故事崩壞中觀戰模式升級**
+
+- **填詞階段**：觀戰者可即時看到每位玩家提交的答案（姓名 + 彩色頭像 + 答案內容），未提交玩家顯示等待動畫
+- **揭示 & 結束階段**：觀戰者與玩家同步看到相同的故事揭示畫面，跟隨房主操作一格一格揭露
+
+**2. 修正房主切換觀戰者模式的邊框重疊問題**
+
+`host-spec-exit-bar` 原本位於 `.panel` 內部，自身帶有獨立 `border`，與外層面板邊框產生雙邊框視覺衝突。修法：exit bar 改用負 margin 延伸至面板邊緣，上兩角 `border-radius` 改為與面板外框一致，視覺上融為一體，不再出現重疊邊線。
+

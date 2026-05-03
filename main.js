@@ -2933,6 +2933,111 @@ const ML_TEMPLATES = [
     '一個名詞',         // 12
     ],
   },
+  {
+  id: 'court_001',
+  title: '⚖️ 星際法庭：第 99 號案件',
+  desc: '這場審判的結果，將決定整個星系的命運。',
+  story: '審判長【{0}】敲響了【{1}】，宣佈庭審開始。被告人【{2}】被控在【{3}】期間，私自帶著【{4}】進入了【{5}】。證人【{6}】上庭指出，當時他正忙著【{7}】，卻看見被告正在【{8}】，嘴裡還大喊著：「{9}！」這讓現場的【{10}】感到非常【{11}】。辯方律師【{12}】反駁說，這一切都是為了【{13}】，並拿出了一個【{14}】作為證據。接著，現場突然響起了【{15}】的聲音，所有的【{16}】開始【{17}】。審判長氣得揮動【{18}】，大罵：「{19}！」最後，法庭宣判被告必須在【{20}】接受【{21}】的處分，並賠償十萬個【{22}】。這場審判被評價為史上最【{23}】的【{24}】。',
+  prompts: [
+    '一個姓名',     // 0
+    '一個物件',         // 1
+    '一個姓名',        // 2
+    '一個事件',   // 3
+    '一個物品',         // 4
+    '一個地點',         // 5
+    '一個姓名',         // 6
+    '一個動作',         // 7
+    '一個動作',         // 8
+    '一句短語',         // 9
+    '一種職業',     // 10
+    '一個形容詞',       // 11
+    '一個姓名',        // 12
+    '一個活動',     // 13
+    '一個物品',         // 14
+    '一個擬聲詞',       // 15
+    '一種東西（複數）',  // 16
+    '一個動作',         // 17
+    '一個長條狀物品',    // 18
+    '一句短語',     // 19
+    '一個特定地點',     // 20
+    '一個動作',     // 21
+    '一種小東西',       // 22
+    '一個形容詞',       // 23
+    '一個名詞',         // 24
+    ],
+  },
+  {
+  id: 'reality_001',
+  title: '🏃 終極挑戰：誰能活到最後？',
+  desc: '這場比賽沒有規則，唯一的目標就是活下去。',
+  story: '歡迎來到《【{0}】大挑戰》！參賽者【{1}】一進場就摔進了【{2}】，現場響起一片【{3}】聲。第一關的任務是：在【{4}】內找到隱藏的【{5}】。這時，【{6}】突然跳出來，手持【{7}】對大家進行【{8}】。參賽者們紛紛開始【{9}】，場面變得非常【{10}】。觀察員【{11}】評論道：「這真是【{12}】的表現。」到了晚上，大家圍著【{13}】開始【{14}】，並分享各自帶來的【{15}】。突然，廣播傳來【{16}】的指令：「請立刻【{17}】！」【{1}】嚇得抓起【{18}】就往【{19}】衝。最終，只有【{1}】成功拿到了【{20}】，贏得了一年份的【{21}】。他對著鏡頭流下【{22}】的眼淚，大喊：「{23}！」這場比賽在網路上被封為「最【{24}】的【{25}】」。',
+  prompts: [
+    '一個名詞',         // 0
+    '一個姓名',            // 1
+    '一個空間/容器',     // 2
+    '一個擬聲詞',       // 3
+    '一個地點',     // 4
+    '一個小物件',       // 5
+    '一個角色',     // 6
+    '一個裝備/工具',     // 7
+    '一個動作',         // 8
+    '一個動作',         // 9
+    '一個形容詞',       // 10
+    '一個人名',        // 11
+    '一個形容詞',       // 12
+    '一個物件',         // 13
+    '一個動作',         // 14
+    '一種食物',     // 15
+    '一個稱呼',         // 16
+    '一個動作',         // 17
+    '一個隨身物品',     // 18
+    '一個方向',     // 19
+    '一個獎項名次',    // 20
+    '一種名詞',       // 21
+    '一個顏色',   // 22
+    '一句話',           // 23
+    '一個形容詞',       // 24
+    '一個名詞',         // 25
+    ],
+  },
+  {
+  id: 'dream_999',
+  title: '🧠 實驗編號 0X-42：意識解構報告',
+  desc: '警告：本文件包含高度不穩定的思維碎片。',
+  story: '在實驗開始後的第【{0}】分鐘，【{1}】感覺到【{2}】正在【{3}】。周圍的牆壁變成了【{4}】做的，並發出【{5}】的氣味。他試圖拿起【{6}】，但【{6}】卻變成了一個【{7}】。這時，【{8}】走過來，對他進行了【{9}】，並低聲耳語：「{10}。」瞬間，整個空間切換到了【{11}】，天空中下起了【{12}】。他開始瘋狂地【{13}】，直到看見【{14}】正在【{15}】。他的身體變得非常【{16}】，感覺像是在【{17}】。為了逃離，他必須找到【{18}】並將其放入【{19}】。然而，【{20}】卻在那裡【{21}】。他大叫一聲：「{22}！」然後從【{23}】跳了下去。醒來後，他發現床邊放著一個【{24}】，上面寫著【{25}】。這讓他感到無比【{26}】。最後，他決定【{27}】，並把這一切稱為「【{28}】的【{29}】」。',
+  prompts: [
+    '一個數字',         // 0
+    '一個人名',            // 1
+    '一個名詞',         // 2
+    '一個動作',         // 3
+    '一種材質/物質',     // 4
+    '一個形容詞',       // 5
+    '一個物品',         // 6
+    '一個物品',       // 7
+    '一個人名',     // 8
+    '一個動作',         // 9
+    '一句奇怪的話',     // 10
+    '一個地點',         // 11
+    '一種東西（複數）',  // 12
+    '一個動作',         // 13
+    '一個外號',    // 14
+    '一個動作',         // 15
+    '一個形容詞',       // 16
+    '一個動詞',     // 17
+    '一個小東西',       // 18
+    '一個容器',         // 19
+    '一個姓名',         // 20
+    '一個動作',         // 21
+    '一句話',     // 22
+    '一個地點',     // 23
+    '一個物件',         // 24
+    '一串文字',     // 25
+    '一個形容詞',       // 26
+    '一個動作',         // 27
+    '一個形容詞',       // 28
+    '一個名詞',         // 29
+    ],
+  },
 ];
 
 // ── Template Loader Interface ─────────────────────────────────────────
@@ -3430,9 +3535,14 @@ class UIController {
     const t = document.getElementById('toast');
     if (!t) return;
     t.textContent = msg;
-    t.className   = 'toast ' + type;
-    clearTimeout(this._toastTmr);
-    this._toastTmr = setTimeout(() => t.classList.add('hidden'), 3600);
+    t.classList.add('hidden');
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        t.className = 'toast ' + type;
+        clearTimeout(this._toastTmr);
+        this._toastTmr = setTimeout(function() { t.classList.add('hidden'); }, 3800);
+      }.bind(this));
+    }.bind(this));
   }
 
   overlay(msg) {
@@ -3487,11 +3597,21 @@ class UIController {
     if (!cnt || !lst) return;
     const n = Object.keys(players).length;
     cnt.textContent = n + ' / ' + maxP;
-    lst.innerHTML = Object.entries(players).map(function([id, p]) {
-      const amHost = id === hostId;
-      const isMe   = id === myId;
+
+    // Track which pids are already rendered to animate new arrivals
+    const existingIds = new Set(Array.from(lst.querySelectorAll('li[data-pid]')).map(el => el.getAttribute('data-pid')));
+
+    // Build new map
+    const newHtml = Object.entries(players).map(function([id, p]) {
+      const amHost  = id === hostId;
+      const isMe    = id === myId;
       const canKick = isHost && !isMe;
-      return '<li class="player-item ' + (amHost ? 'is-host' : '') + (p.isSpectator ? ' is-spectator' : '') + '">' +
+      const isNew   = !existingIds.has(id);
+      return '<li class="player-item' +
+        (amHost ? ' is-host' : '') +
+        (p.isSpectator ? ' is-spectator' : '') +
+        (isNew ? ' joining' : '') +
+        '" data-pid="' + id + '">' +
         '<div class="player-avatar" style="background:' + Utils.avatarColor(p.name) + '">' + (p.name || '?')[0] + '</div>' +
         '<span class="player-name">' + Utils.escapeHtml(p.name) + '</span>' +
         '<div class="player-badges">' +
@@ -3503,6 +3623,7 @@ class UIController {
         (canKick ? '<button class="player-kick-btn" data-kick-id="' + id + '" title="踢出玩家">✕ 踢出</button>' : '') +
         '</li>';
     }).join('');
+    lst.innerHTML = newHtml;
 
     // Kick button delegation
     lst.querySelectorAll('.player-kick-btn').forEach(btn => {
@@ -3539,6 +3660,16 @@ class UIController {
     this._show('host-spec-exit-bar',    !!(s.isHost && s.isSpectator));
     this._show('waiting-panel',         !s.isHost && !s.isSpectator);
     this._show('spectator-lobby-panel', !s.isHost && !!s.isSpectator);
+    var roomBody = document.querySelector('.room-body');
+    if (roomBody) {
+      var panelIds = ['settings-panel', 'waiting-panel', 'spectator-lobby-panel'];
+      var anyVisible = panelIds.some(function(id) {
+        var el = document.getElementById(id);
+        return el && !el.classList.contains('hidden');
+      });
+      roomBody.classList.toggle('has-right-panel', anyVisible);
+    }
+
 
     // Sync max-players select (host only)
     if (s.isHost) {
@@ -3924,14 +4055,35 @@ class UIController {
     var codeInp   = document.getElementById('input-room-code');
     var loading   = document.getElementById('home-loading-bar');
 
-    if (createBtn) createBtn.disabled = busy;
-    if (joinBtn)   joinBtn.disabled   = busy;
-    if (nameInp)   nameInp.disabled   = busy;
-    if (codeInp)   codeInp.disabled   = busy;
+    if (createBtn) {
+      createBtn.disabled = busy;
+      createBtn.classList.toggle('btn-loading', busy);
+    }
+    if (joinBtn) {
+      joinBtn.disabled = busy;
+      joinBtn.classList.toggle('btn-loading', busy);
+    }
+    if (nameInp) nameInp.disabled = busy;
+    if (codeInp) codeInp.disabled = busy;
     if (loading) {
       loading.classList.toggle('hidden', !busy);
       var loadTxt = loading.querySelector('.home-loading-txt');
-      if (loadTxt) loadTxt.textContent = msg;
+      if (loadTxt) {
+        // Animated dots: base text + cycling dots
+        clearInterval(this._loadingDotsInterval);
+        if (busy) {
+          var base = msg ? msg.replace(/…$/, '') : '';
+          var dots = 0;
+          loadTxt.textContent = base + '…';
+          this._loadingDotsInterval = setInterval(function() {
+            dots = (dots + 1) % 4;
+            loadTxt.textContent = base + '.'.repeat(dots) || base;
+          }, 420);
+        } else {
+          clearInterval(this._loadingDotsInterval);
+          if (loadTxt) loadTxt.textContent = '';
+        }
+      }
     }
   }
 
@@ -3990,6 +4142,39 @@ class UIController {
         self._renderRoomControls(store.get());
       });
     });
+
+    // ── Game type rail: arrow scroll buttons ────────────
+    (function() {
+      var rail    = document.querySelector('.game-type-rail');
+      var scroller = document.querySelector('.game-type-switcher');
+      if (!rail || !scroller) return;
+      var btnL = rail.querySelector('.gts-arrow-left');
+      var btnR = rail.querySelector('.gts-arrow-right');
+      var STEP = 160;
+
+      function updateArrows() {
+        if (!btnL || !btnR) return;
+        if (scroller.clientWidth === 0) return; // panel hidden, skip
+        var maxScroll = scroller.scrollWidth - scroller.clientWidth;
+        var atStart = scroller.scrollLeft <= 2;
+        var atEnd   = maxScroll <= 2 || scroller.scrollLeft >= maxScroll - 2;
+        btnL.classList.toggle('at-edge', atStart);
+        btnR.classList.toggle('at-edge', atEnd);
+      }
+
+      if (btnL) btnL.addEventListener('click', function() { scroller.scrollBy({ left: -STEP, behavior: 'smooth' }); });
+      if (btnR) btnR.addEventListener('click', function() { scroller.scrollBy({ left:  STEP, behavior: 'smooth' }); });
+      scroller.addEventListener('scroll', updateArrows, { passive: true });
+
+      // Re-run when settings panel becomes visible (clientWidth was 0 when hidden)
+      var panel = document.getElementById('settings-panel');
+      if (panel && window.MutationObserver) {
+        new MutationObserver(function() {
+          if (!panel.classList.contains('hidden')) requestAnimationFrame(updateArrows);
+        }).observe(panel, { attributes: true, attributeFilter: ['class'] });
+      }
+      updateArrows();
+    })();
 
     // ── Story: start game ───────────────────────────────
     this._on('btn-start-game', 'click', function() {
@@ -4556,6 +4741,11 @@ class UIController {
       var text = inp.value.trim(); if (!text) return;
       var s = store.get(); if (!s.roomCode || !s.myId) return;
       inp.value = '';
+      // 🦢 Easter egg
+      if (text === '/swan 60519') {
+        transport.pushChat(s.roomCode, { pid: s.myId, name: s.myName || '???', text: text, type: 'swan' });
+        return;
+      }
       transport.pushChat(s.roomCode, { pid: s.myId, name: s.myName || '???', text: text });
     };
     var fcSend = document.getElementById('fc-send-btn');
@@ -4743,6 +4933,12 @@ class UIController {
     if (msg.ts && msg.ts <= this._chatSeenTs) return;
     if (msg.ts) this._chatSeenTs = Math.max(this._chatSeenTs, msg.ts);
 
+    // 🦢 Easter egg — swan summon
+    if (msg.type === 'swan') {
+      this._triggerSwanEasterEgg(msg.name);
+      return; // don't render in chat
+    }
+
     var s    = store.get();
     var isMe = msg.pid === s.myId;
     cont.appendChild(this._makeMsgEl(msg, isMe, false));
@@ -4762,6 +4958,156 @@ class UIController {
         }
       }
     }
+  }
+
+  _triggerSwanEasterEgg(summoner) {
+    this.toast((summoner || '???') + ' 以召喚出天鵝，禾禾禾 🦢');
+
+    var old = document.getElementById('swan-overlay');
+    if (old) old.remove();
+
+    var overlay = document.createElement('div');
+    overlay.id = 'swan-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;pointer-events:none;overflow:hidden;';
+
+    // ── SVG Swan (faces left, flies right→left) ──────────
+    // Wing flap via CSS rotate on <g>, NOT scaleY on body
+    var svgStyle = document.createElement('style');
+    svgStyle.textContent = [
+      '@keyframes swWingUp{0%{transform:rotate(-30deg)}100%{transform:rotate(18deg)}}',
+      '.sw-wing{transform-origin:68px 60px;animation:swWingUp .35s ease-in-out infinite alternate}',
+      '@keyframes swBodyBob{0%{transform:translateY(0)}100%{transform:translateY(-6px)}}',
+      '.sw-body-group{animation:swBodyBob .7s ease-in-out infinite alternate}',
+    ].join('');
+    document.head.appendChild(svgStyle);
+
+    var swan = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    swan.setAttribute('viewBox', '0 0 140 100');
+    swan.style.cssText = [
+      'position:absolute',
+      'width:130px',
+      'height:93px',
+      'overflow:visible',
+      'filter:drop-shadow(0 4px 14px rgba(180,210,255,.55))',
+      'will-change:transform',
+      'transform:scaleX(-1)',   /* flip to face right */
+    ].join(';');
+    swan.innerHTML = [
+      // Static body group (bobs up/down)
+      '<g class="sw-body-group">',
+        // Body
+        '<ellipse cx="78" cy="68" rx="48" ry="22" fill="white"/>',
+        // Tail feathers
+        '<path d="M122 62 Q140 50 137 70 Q130 66 122 66Z" fill="#ececf8"/>',
+        '<path d="M118 65 Q136 58 134 74 Q127 70 118 68Z" fill="white"/>',
+        // Neck (thick curved stroke)
+        '<path d="M 46 58 Q 28 38 35 16" stroke="white" stroke-width="13"',
+        '  fill="none" stroke-linecap="round"/>',
+        // Head
+        '<circle cx="35" cy="14" r="13" fill="white"/>',
+        // Beak
+        '<path d="M 24 14 L 7 17 Q 7 22 18 21 L 24 17Z" fill="#f97316"/>',
+        // Nostril line
+        '<line x1="20" y1="16" x2="10" y2="18" stroke="#c45d00" stroke-width="1.2" stroke-linecap="round"/>',
+        // Eye
+        '<circle cx="29" cy="10" r="3.5" fill="#1e1b4b"/>',
+        '<circle cx="28" cy="9" r="1.2" fill="white"/>',
+        // Wing (rotates around shoulder pivot)
+        '<g class="sw-wing">',
+          '<path d="M65 58 Q92 24 124 42 Q102 52 65 58Z" fill="white"/>',
+          '<path d="M65 62 Q90 36 120 50 Q100 58 65 62Z" fill="#dde8ff" opacity=".75"/>',
+          // Wing feather tips
+          '<path d="M90 32 Q105 26 116 36" stroke="#dde8ff" stroke-width="2.5"',
+          '  fill="none" stroke-linecap="round"/>',
+        '</g>',
+      '</g>',
+    ].join('');
+    overlay.appendChild(swan);
+    document.body.appendChild(overlay);
+
+    var DURATION  = 5000;
+    var W         = window.innerWidth;
+    var H         = window.innerHeight;
+    // Left-bottom → Right-top  (swan faces right after scaleX flip)
+    var startX    = -140,    startY = H + 80;
+    var endX      = W + 80,  endY   = -80;
+
+    // Angle of the flight path — apply to swan so it looks where it's going
+    // scaleX(-1) mirrors rotation direction, so we pass the raw atan2 value
+    var flightAngle = Math.atan2(endY - startY, endX - startX) * 180 / Math.PI;
+
+    var MONEY     = ['💵','💴','💶','💸','🪙','💰'];
+    var lastSpawn = -999;
+    var SPAWN_INT = 175;
+    var rafStart  = null;
+
+    function spawnCoin(sx, sy) {
+      var coin = document.createElement('span');
+      coin.textContent = MONEY[Math.floor(Math.random() * MONEY.length)];
+      var size   = 14 + Math.random() * 13;
+      var vx     = (Math.random() - 0.5) * 100;
+      var vy     = -(35 + Math.random() * 75);
+      var rot0   = Math.random() * 360;
+      var rotSpd = (Math.random() - 0.5) * 860;
+      var dur    = 900 + Math.random() * 700;
+      coin.style.cssText = [
+        'position:absolute',
+        'font-size:' + size + 'px',
+        'left:' + sx + 'px',
+        'top:' + sy + 'px',
+        'will-change:transform,opacity',
+      ].join(';');
+      overlay.appendChild(coin);
+
+      var cs = null;
+      (function loop(ts) {
+        if (!cs) cs = ts;
+        var t  = Math.min((ts - cs) / dur, 1);
+        var cx = sx + vx * t;
+        var cy = sy + vy * t + 310 * t * t;
+        var r  = rot0 + rotSpd * t;
+        var op = t < 0.2 ? 1 : 1 - (t - 0.2) / 0.8;
+        coin.style.transform = 'translate(-50%,-50%) rotate(' + r + 'deg) scale(' + (1 - t * 0.25) + ')';
+        coin.style.left    = cx + 'px';
+        coin.style.top     = cy + 'px';
+        coin.style.opacity = op;
+        if (t < 1) requestAnimationFrame(loop);
+        else coin.remove();
+      })(performance.now());
+    }
+
+    function tick(ts) {
+      if (!rafStart) rafStart = ts;
+      var elapsed = ts - rafStart;
+      var t       = Math.min(elapsed / DURATION, 1);
+
+      var x     = startX + (endX - startX) * t;
+      var y     = startY + (endY - startY) * t;
+      var alpha = t < 0.06 ? t / 0.06 : t > 0.9 ? (1 - t) / 0.1 : 1;
+
+      swan.style.left    = x + 'px';
+      swan.style.top     = y + 'px';
+      swan.style.opacity = alpha;
+      swan.style.transform = 'translate(-50%,-50%) scaleX(-1) rotate(' + (-flightAngle) + 'deg)';
+
+      if (elapsed - lastSpawn >= SPAWN_INT) {
+        lastSpawn = elapsed;
+        spawnCoin(x, y);
+        if (Math.random() > 0.5) {
+          var ddx = (Math.random() - 0.5) * 40;
+          var ddy = (Math.random() - 0.5) * 40;
+          setTimeout(function() { spawnCoin(x + ddx, y + ddy); }, 70);
+        }
+      }
+
+      if (t < 1) requestAnimationFrame(tick);
+      else setTimeout(function() {
+        if (overlay.parentNode) overlay.remove();
+        svgStyle.remove();
+      }, 1500);
+    }
+
+    requestAnimationFrame(tick);
   }
 
   _appendDMMsg(msg) {
@@ -6991,7 +7337,13 @@ class UIController {
     // Spectator overlay
     var specOv = document.getElementById('ml-spectator-overlay');
     if (specOv) specOv.classList.toggle('hidden', !isSpectator);
-    if (isSpectator) { this._renderMadlibSpectator(g, players); return; }
+    if (isSpectator) {
+      // During reveal/end, spectators see the same story display as players
+      if (phase === 'reveal') { this._renderMadlibReveal(g, false); return; }
+      if (phase === 'end')    { this._renderMadlibEnd(g);           return; }
+      this._renderMadlibSpectator(g, players);
+      return;
+    }
 
     if (phase === 'answering') this._renderMadlibAnswering(g, myId, players, isHost);
     if (phase === 'reveal')    this._renderMadlibReveal(g, isHost);
@@ -7179,11 +7531,27 @@ class UIController {
       if (tpl) html += '<div class="spec-round-info">📖 ' + Utils.escapeHtml(tpl.title) + '</div>';
     }
     if (phase === 'answering') {
-      var cr = g.currentRound;
-      var total = (g.rounds || []).length;
-      var sub   = Object.keys(((g.submitted || {})[cr] || {})).length;
-      var act   = (g.activePids || []).length;
-      html += '<div class="spec-round-info">第 ' + (cr+1) + ' / ' + total + ' 輪　' + sub + ' / ' + act + ' 人已提交</div>';
+      var cr       = g.currentRound;
+      var total    = (g.rounds || []).length;
+      var submitted = (g.submitted || {})[cr] || {};
+      var answers   = (g.answers  || {})[cr] || {};
+      var activePids = g.activePids || [];
+      var sub = Object.keys(submitted).length;
+      html += '<div class="spec-round-info">第 ' + (cr+1) + ' / ' + total + ' 輪　' + sub + ' / ' + activePids.length + ' 人已提交</div>';
+      html += '<div class="spec-answers-list">';
+      activePids.forEach(function(pid) {
+        var p = players[pid] || {};
+        var name = Utils.escapeHtml(p.name || pid);
+        var color = Utils.avatarColor(p.name || pid);
+        var avatar = '<span class="spec-ans-avatar" style="background:' + color + '">' + (p.name||'?')[0].toUpperCase() + '</span>';
+        if (submitted[pid]) {
+          var ans = Utils.escapeHtml(answers[pid] || '');
+          html += '<div class="spec-ans-row spec-ans-done">' + avatar + '<span class="spec-ans-name">' + name + '</span><span class="spec-ans-text">' + ans + '</span></div>';
+        } else {
+          html += '<div class="spec-ans-row spec-ans-wait">' + avatar + '<span class="spec-ans-name">' + name + '</span><span class="spec-ans-pending">填寫中…</span></div>';
+        }
+      });
+      html += '</div>';
     }
     cont.innerHTML = html;
   }
